@@ -25,6 +25,16 @@ func (d Directory) Own() types.JID {
 	return d.Client.Store.ID.ToNonAD()
 }
 
+// IsOwn reports whether jid is the account's own phone-number JID or LID.
+func (d Directory) IsOwn(jid types.JID) bool {
+	jid = jid.ToNonAD()
+	if id := d.Client.Store.ID; id != nil && jid.User == id.User && jid.Server == types.DefaultUserServer {
+		return true
+	}
+	lid := d.Client.Store.GetLID()
+	return !lid.IsEmpty() && jid.User == lid.User && jid.Server == types.HiddenUserServer
+}
+
 // PhoneJID returns the phone-number JID of a LID, or jid when it is not a LID or is unknown.
 func (d Directory) PhoneJID(ctx context.Context, jid types.JID) types.JID {
 	if jid.Server != types.HiddenUserServer {

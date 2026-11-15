@@ -172,14 +172,23 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 	if !history && info.IsFromMe && b.wasSent(info.ID) {
 		return false
 	}
-	c := describeWA(evt.Message)
-	if c.skip {
-		return false
-	}
 	chat := b.canonical(ctx, info.Chat)
 	sender := b.canonical(ctx, info.Sender)
 	if info.IsFromMe {
 		sender = b.dir.Own()
+	}
+	if !history {
+		if b.handleProtocol(ctx, chat, sender, info, evt.Message) {
+			return false
+		}
+		if r := evt.Message.GetReactionMessage(); r != nil {
+			b.reacted(ctx, chat, sender, info, r)
+			return false
+		}
+	}
+	c := describeWA(evt.Message)
+	if c.skip {
+		return false
 	}
 	if history {
 		if done, err := b.store.HasWhatsApp(ctx, chat.String(), info.ID); err != nil || done {
@@ -213,7 +222,7 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 	}
 	link := store.Link{
 		Bot: bot.ID(), TGChat: out.Chat, TGMsg: msgID, WAChat: chat.String(), WAID: info.ID,
-		WASender: info.Sender.ToNonAD().String(), Text: truncate(c.text, quoteLen),
+		WASender: info.Sender.ToNonAD().String(), Text: truncate(c.text, quoteLen), SenderBot: bot.ID(),
 	}
 	if err := b.store.PutLink(ctx, link); err != nil {
 		b.log.Error("store link", "err", err)
@@ -420,10 +429,17 @@ func (b *Bridge) HandleTelegram(ctx context.Context, bot Telegram, in Incoming) 
 		return ""
 	}
 	if in.Command != "" {
+		// Every bot in a group sees commands; only the one that serves the chat answers.
+		if _, ok, problem := b.target(ctx, bot, in); !ok {
+			return problem
+		}
+		if in.Command == "del" {
+			return b.deleteOwn(ctx, bot, in)
+		}
 		if quietCommands[in.Command] {
 			return ""
 		}
-		return "⚠️ Messages that start with / are bot commands and are not sent to WhatsApp."
+		return "⚠️ Messages that start with / are bot commands and are not sent to WhatsApp. Reply /del to your message to delete it there."
 	}
 	target, ok, problem := b.target(ctx, bot, in)
 	if !ok {
