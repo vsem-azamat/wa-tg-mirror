@@ -4,11 +4,20 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
+    # Only changes that can alter the image or the deployment restart the bridge.
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "deploy/**"
+      - ".github/workflows/deploy.yml"
+      - ".github/workflows/ci.yml"
 
-# Repository secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS.
+# Secrets of the production environment (limited to main): DEPLOY_HOST, DEPLOY_SSH_KEY,
+# DEPLOY_KNOWN_HOSTS. Variable of the environment: DEPLOY_USER.
 # config.yaml and .env live only on the host and are never written by this workflow.
 
 env:
@@ -66,7 +75,7 @@ jobs:
       contents: read
       packages: read
     env:
-      SSH_TARGET: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+      SSH_TARGET: ${{ vars.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
       DEPLOY_DIR: deploy/wa-tg-mirror
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,8 +125,17 @@ jobs:
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
           printf '%s\n' "$token" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin >/dev/null
           docker compose --env-file image.env pull
-          docker compose --env-file image.env up -d --remove-orphans --wait --wait-timeout 180
+          # On failure show the container state only: the run log is public, the app log is not.
+          docker compose --env-file image.env up -d --remove-orphans --wait --wait-timeout 180 || {
+            docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' \
+              $(docker compose --env-file image.env ps -aq)
+            exit 1
+          }
           docker compose --env-file image.env ps
+          # Drop this project's older image tags; other projects share the host.
+          current="ghcr.io/vsem-azamat/wa-tg-mirror:$(sed -n 's/^IMAGE_TAG=//p' image.env)"
+          docker images ghcr.io/vsem-azamat/wa-tg-mirror --format '{{.Repository}}:{{.Tag}}' |
+            grep -vx "$current" | xargs -r docker rmi >/dev/null || true
           docker image prune -f >/dev/null
           REMOTE
           )

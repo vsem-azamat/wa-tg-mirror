@@ -2,7 +2,7 @@
 
 ## Deployment
 
-A merge to `main` runs the CI checks, builds `ghcr.io/vsem-azamat/wa-tg-mirror:<short sha>` and deploys it over SSH with [`deploy/compose.yaml`](../deploy/compose.yaml) into `~/deploy/wa-tg-mirror` on the host. The workflow needs the repository secrets `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` and `DEPLOY_KNOWN_HOSTS`.
+A merge to `main` runs the CI checks, builds `ghcr.io/vsem-azamat/wa-tg-mirror:<short sha>` and deploys it over SSH with [`deploy/compose.yaml`](../deploy/compose.yaml) into `~/deploy/wa-tg-mirror` on the host. The workflow uses the `production` environment, limited to `main`: its secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY` and `DEPLOY_KNOWN_HOSTS` and its variable `DEPLOY_USER`. Only changes to the code, the image or the deployment trigger it.
 
 The host directory holds files the workflow never writes:
 
