@@ -17,6 +17,9 @@ type WhatsApp interface {
 	Upload(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	MarkRead(ctx context.Context, ids []types.MessageID, ts time.Time, chat, sender types.JID, receiptTypeExtra ...types.ReceiptType) error
+	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
+	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
+	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
 }
 
 // Directory answers who is who on WhatsApp.
@@ -79,6 +82,12 @@ type Telegram interface {
 	Download(ctx context.Context, fileID string) ([]byte, error)
 	// CreateTopic creates a forum topic and returns its thread ID.
 	CreateTopic(ctx context.Context, chat int64, name string) (int, error)
+	// Edit replaces the text, or the caption of a media message, of a message the bot sent.
+	Edit(ctx context.Context, chat int64, msg int, out Outgoing) error
+	// Delete deletes a message.
+	Delete(ctx context.Context, chat int64, msg int) error
+	// React sets the bot's reaction on a message; "" removes it.
+	React(ctx context.Context, chat int64, msg int, emoji string) error
 }
 
 // Profile is a bot that can change its own name and photo.
@@ -94,6 +103,14 @@ type Profile interface {
 type Pictures interface {
 	// Picture returns the current picture ID and image of a user, or "" when there is none.
 	Picture(ctx context.Context, jid types.JID) (id string, jpeg []byte, err error)
+}
+
+// Reaction is a reaction the owner changed in Telegram.
+type Reaction struct {
+	Chat  int64
+	Msg   int
+	From  int64
+	Emoji string // "" when the reaction was removed
 }
 
 // Incoming is a message the owner sent to a bot.

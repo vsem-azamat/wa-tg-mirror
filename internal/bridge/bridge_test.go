@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -54,6 +55,24 @@ func (f *fakeWA) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message
 	return whatsmeow.SendResponse{ID: "OUT" + strconv.Itoa(f.nextID)}, nil
 }
 
+func (f *fakeWA) BuildEdit(_ types.JID, id types.MessageID, c *waE2E.Message) *waE2E.Message {
+	return &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+		Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(), Key: &waCommon.MessageKey{ID: proto.String(id)}, EditedMessage: c,
+	}}
+}
+
+func (f *fakeWA) BuildRevoke(_, _ types.JID, id types.MessageID) *waE2E.Message {
+	return &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+		Type: waE2E.ProtocolMessage_REVOKE.Enum(), Key: &waCommon.MessageKey{ID: proto.String(id)},
+	}}
+}
+
+func (f *fakeWA) BuildReaction(_, sender types.JID, id types.MessageID, r string) *waE2E.Message {
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key: &waCommon.MessageKey{ID: proto.String(id), Participant: proto.String(sender.String())}, Text: proto.String(r),
+	}}
+}
+
 func (f *fakeWA) Upload(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	return whatsmeow.UploadResponse{URL: "u", DirectPath: "d", FileLength: 3}, nil
 }
@@ -85,11 +104,30 @@ func (d fakeDir) Name(_ context.Context, jid types.JID) string {
 }
 
 type fakeBot struct {
-	id     int64
-	mu     sync.Mutex
-	out    []Outgoing
-	topics []string
-	nextID int
+	id      int64
+	mu      sync.Mutex
+	out     []Outgoing
+	topics  []string
+	nextID  int
+	edits   []Outgoing
+	deleted []int
+	reacted []string // "msg:emoji"
+}
+
+func (b *fakeBot) Edit(_ context.Context, _ int64, msg int, out Outgoing) error {
+	out.ReplyTo = msg
+	b.edits = append(b.edits, out)
+	return nil
+}
+
+func (b *fakeBot) Delete(_ context.Context, _ int64, msg int) error {
+	b.deleted = append(b.deleted, msg)
+	return nil
+}
+
+func (b *fakeBot) React(_ context.Context, _ int64, msg int, emoji string) error {
+	b.reacted = append(b.reacted, strconv.Itoa(msg)+":"+emoji)
+	return nil
 }
 
 func (b *fakeBot) ID() int64 { return b.id }
@@ -424,5 +462,93 @@ func TestHistoryIsStampedMarkedByDayAndNotRepeated(t *testing.T) {
 	}
 	if len(f.wa.read) != 0 {
 		t.Fatal("history must not send read receipts")
+	}
+}
+
+func protocol(id string, t waE2E.ProtocolMessage_Type, target string, chat, sender types.JID, edited *waE2E.Message) *events.Message {
+	m := waText(id, "", chat, sender, false)
+	m.Message = &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+		Type: t.Enum(), Key: &waCommon.MessageKey{ID: proto.String(target)}, EditedMessage: edited,
+	}}
+	return m
+}
+
+func TestWhatsAppEditAndDeleteReachTheMirroredMessage(t *testing.T) {
+	f := newFixture(t)
+	a := pn(alicePhone)
+	f.b.HandleWhatsApp(t.Context(), waText("A1", "hello", a, a, false))
+	f.b.HandleWhatsApp(t.Context(), protocol("E1", waE2E.ProtocolMessage_MESSAGE_EDIT, "A1", a, a,
+		&waE2E.Message{Conversation: proto.String("hello!")}))
+	if len(f.alice.edits) != 1 || f.alice.edits[0].Text != "hello!" || f.alice.edits[0].ReplyTo != 1 {
+		t.Fatalf("edits %+v", f.alice.edits)
+	}
+	if len(f.alice.out) != 1 {
+		t.Fatal("an edit must not post a new message")
+	}
+	f.b.HandleWhatsApp(t.Context(), protocol("R1", waE2E.ProtocolMessage_REVOKE, "A1", a, a, nil))
+	if len(f.alice.deleted) != 1 || f.alice.deleted[0] != 1 {
+		t.Fatalf("deleted %v", f.alice.deleted)
+	}
+}
+
+func TestWhatsAppReactionIsSetByTheReactorsBot(t *testing.T) {
+	f := newFixture(t)
+	g, _ := types.ParseJID(groupJID)
+	f.b.HandleWhatsApp(t.Context(), waText("G1", "news", g, pn(bobPhone), false))
+	react := waText("X1", "", g, pn(alicePhone), false)
+	react.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key: &waCommon.MessageKey{ID: proto.String("G1")}, Text: proto.String("❤️"),
+	}}
+	f.b.HandleWhatsApp(t.Context(), react)
+	if len(f.alice.reacted) != 1 || f.alice.reacted[0] != "1:❤️" {
+		t.Fatalf("reactions %v", f.alice.reacted)
+	}
+}
+
+func TestOwnerReactionEditAndDeleteGoToWhatsApp(t *testing.T) {
+	f := newFixture(t)
+	a := pn(alicePhone)
+	f.b.HandleWhatsApp(t.Context(), waText("A1", "hi", a, a, false))
+	f.b.HandleTelegramReaction(t.Context(), f.alice, Reaction{Chat: owner, Msg: 1, From: owner, Emoji: "❤"})
+	r := f.wa.sent[len(f.wa.sent)-1].msg.GetReactionMessage()
+	if r.GetKey().GetID() != "A1" || r.GetText() != "❤️" {
+		t.Fatalf("reaction %v", r)
+	}
+
+	f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 50, From: owner, Kind: KindText, Text: "typo"})
+	sentID := "OUT" + strconv.Itoa(f.wa.nextID)
+	if p := f.b.HandleTelegramEdit(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 50, From: owner, Kind: KindText, Text: "fixed"}); p != "" {
+		t.Fatal(p)
+	}
+	e := f.wa.sent[len(f.wa.sent)-1].msg.GetProtocolMessage()
+	if e.GetType() != waE2E.ProtocolMessage_MESSAGE_EDIT || e.GetKey().GetID() != sentID || e.GetEditedMessage().GetConversation() != "fixed" {
+		t.Fatalf("edit %v", e)
+	}
+
+	if p := f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 51, From: owner, Command: "del", ReplyTo: 1}); p == "" {
+		t.Fatal("someone else's message must not be deletable")
+	}
+	if p := f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 52, From: owner, Command: "del", ReplyTo: 50}); p != "" {
+		t.Fatal(p)
+	}
+	d := f.wa.sent[len(f.wa.sent)-1].msg.GetProtocolMessage()
+	if d.GetType() != waE2E.ProtocolMessage_REVOKE || d.GetKey().GetID() != sentID {
+		t.Fatalf("revoke %v", d)
+	}
+	if len(f.alice.deleted) != 2 || f.alice.deleted[0] != 50 || f.alice.deleted[1] != 52 {
+		t.Fatalf("deleted in Telegram %v", f.alice.deleted)
+	}
+}
+
+func TestGroupChangesAndCallsAreNoted(t *testing.T) {
+	f := newFixture(t)
+	g, _ := types.ParseJID(groupJID)
+	f.b.HandleGroupInfo(t.Context(), GroupChange{Chat: g, Name: "New name", Join: []types.JID{pn(strangerPN)}})
+	if len(f.service.out) != 2 || f.service.out[0].Chat != groupChat || !strings.Contains(f.service.out[1].Text, "Stranger") {
+		t.Fatalf("notices %+v", f.service.out)
+	}
+	f.b.HandleCall(t.Context(), pn(alicePhone), types.EmptyJID, true)
+	if out := last(t, f.alice); out.Chat != owner || !strings.Contains(out.Text, "video call") {
+		t.Fatalf("call %+v", out)
 	}
 }

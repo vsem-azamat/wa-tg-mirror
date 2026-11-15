@@ -311,17 +311,22 @@ func (b *Bot) SendPhoto(ctx context.Context, chat int64, png []byte, caption str
 	return nil
 }
 
-// Listen long-polls updates and passes every message to handle until ctx ends.
-func (b *Bot) Listen(ctx context.Context, log *slog.Logger, handle func(context.Context, *telego.Message)) error {
+// Listen long-polls updates and passes them to h until ctx ends.
+func (b *Bot) Listen(ctx context.Context, log *slog.Logger, h Handlers) error {
 	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
-		Timeout: 30, AllowedUpdates: []string{"message"},
+		Timeout: 30, AllowedUpdates: []string{"message", "edited_message", "message_reaction"},
 	})
 	if err != nil {
 		return fmt.Errorf("start long polling: %w", err)
 	}
 	for u := range updates {
-		if u.Message != nil {
-			handle(ctx, u.Message)
+		switch {
+		case u.Message != nil && h.Message != nil:
+			h.Message(ctx, u.Message)
+		case u.EditedMessage != nil && h.Edited != nil:
+			h.Edited(ctx, u.EditedMessage)
+		case u.MessageReaction != nil && h.Reaction != nil:
+			h.Reaction(ctx, ToReaction(u.MessageReaction))
 		}
 	}
 	log.Info("long polling stopped", "bot", b.name)

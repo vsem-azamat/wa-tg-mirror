@@ -109,3 +109,12 @@ func TestExtension(t *testing.T) {
 		t.Fatal("extension")
 	}
 }
+
+func TestNormalizeReaction(t *testing.T) {
+	cases := map[string]string{"❤️": "❤", "👍🏽": "👍", "😂": "", "🔥": "🔥"}
+	for in, want := range cases {
+		if got := NormalizeReaction(in); got != want {
+			t.Errorf("%q → %q, want %q", in, got, want)
+		}
+	}
+}

@@ -23,7 +23,7 @@ For the overflow, create a supergroup with topics enabled and add the service bo
 
 `wa-tg-mirror discover -db <file> -qr-png qr.png` shows a QR code (in the terminal, or in a PNG that is rewritten as the code rotates). Scan it in WhatsApp → Settings → Linked devices → Link a device. The command then waits for the chat list and prints the groups with their members, the recent chats and the saved contacts; use it to fill in the configuration. The database file then holds the session and is used by `serve`.
 
-When `serve` starts without a session, it sends the QR code to the owner through the service bot instead.
+When `serve` starts without a session, it sends the QR code to the owner through the service bot instead, as one message whose picture renews with the code.
 
 The phone must come online at least every 14 days, otherwise WhatsApp unlinks the device.
 

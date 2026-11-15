@@ -29,6 +29,9 @@ type Link struct {
 	WASender string
 	// Text is a short copy of the message, used to quote it in a WhatsApp reply.
 	Text string
+	// SenderBot is the bot that posted the Telegram message, 0 for the owner's own
+	// messages; only that bot may edit it.
+	SenderBot int64
 }
 
 // ErrNotFound means there is no link or topic for the key.
@@ -59,10 +62,21 @@ CREATE TABLE IF NOT EXISTS mirror_avatars (
 );
 `
 
-// Open creates the bridge tables in db if they are missing.
+// Open creates the bridge tables in db if they are missing and adds columns that
+// later versions introduced.
 func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return nil, fmt.Errorf("create bridge tables: %w", err)
+	}
+	var has int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('mirror_links') WHERE name = 'sender_bot'`).Scan(&has)
+	if err != nil {
+		return nil, fmt.Errorf("inspect bridge tables: %w", err)
+	}
+	if has == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE mirror_links ADD COLUMN sender_bot INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return nil, fmt.Errorf("add sender_bot: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -78,8 +92,8 @@ func GroupBot(chat, bot int64) int64 {
 // PutLink records l, replacing an older link with the same Telegram key.
 func (s *Store) PutLink(ctx context.Context, l Link) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO mirror_links
-		(bot, tg_chat, tg_msg, wa_chat, wa_id, wa_sender, text) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		GroupBot(l.TGChat, l.Bot), l.TGChat, l.TGMsg, l.WAChat, l.WAID, l.WASender, l.Text)
+		(bot, tg_chat, tg_msg, wa_chat, wa_id, wa_sender, text, sender_bot) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		GroupBot(l.TGChat, l.Bot), l.TGChat, l.TGMsg, l.WAChat, l.WAID, l.WASender, l.Text, l.SenderBot)
 	if err != nil {
 		return fmt.Errorf("put link: %w", err)
 	}
@@ -89,9 +103,9 @@ func (s *Store) PutLink(ctx context.Context, l Link) error {
 // ByTelegram finds the WhatsApp message mirrored by a Telegram message.
 func (s *Store) ByTelegram(ctx context.Context, bot, chat int64, msg int) (Link, error) {
 	l := Link{Bot: GroupBot(chat, bot), TGChat: chat, TGMsg: msg}
-	err := s.db.QueryRowContext(ctx, `SELECT wa_chat, wa_id, wa_sender, text FROM mirror_links
+	err := s.db.QueryRowContext(ctx, `SELECT wa_chat, wa_id, wa_sender, text, sender_bot FROM mirror_links
 		WHERE bot = ? AND tg_chat = ? AND tg_msg = ?`, l.Bot, chat, msg).
-		Scan(&l.WAChat, &l.WAID, &l.WASender, &l.Text)
+		Scan(&l.WAChat, &l.WAID, &l.WASender, &l.Text, &l.SenderBot)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Link{}, ErrNotFound
 	}
@@ -191,4 +205,44 @@ func (s *Store) HasWhatsApp(ctx context.Context, waChat, waID string) (bool, err
 		return false, fmt.Errorf("find link: %w", err)
 	}
 	return n > 0, nil
+}
+
+// LinksOf returns every Telegram copy of a WhatsApp message.
+func (s *Store) LinksOf(ctx context.Context, waChat, waID string) ([]Link, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT bot, tg_chat, tg_msg, wa_sender, text, sender_bot FROM mirror_links
+		WHERE wa_chat = ? AND wa_id = ? ORDER BY tg_msg`, waChat, waID)
+	if err != nil {
+		return nil, fmt.Errorf("find links: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Link
+	for rows.Next() {
+		l := Link{WAChat: waChat, WAID: waID}
+		if err := rows.Scan(&l.Bot, &l.TGChat, &l.TGMsg, &l.WASender, &l.Text, &l.SenderBot); err != nil {
+			return nil, fmt.Errorf("read link: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read links: %w", err)
+	}
+	return out, nil
+}
+
+// SetText updates the quoted copy of a WhatsApp message after an edit.
+func (s *Store) SetText(ctx context.Context, waChat, waID, text string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE mirror_links SET text = ? WHERE wa_chat = ? AND wa_id = ?`, text, waChat, waID)
+	if err != nil {
+		return fmt.Errorf("update link: %w", err)
+	}
+	return nil
+}
+
+// DeleteLinks forgets every Telegram copy of a WhatsApp message.
+func (s *Store) DeleteLinks(ctx context.Context, waChat, waID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mirror_links WHERE wa_chat = ? AND wa_id = ?`, waChat, waID)
+	if err != nil {
+		return fmt.Errorf("delete links: %w", err)
+	}
+	return nil
 }

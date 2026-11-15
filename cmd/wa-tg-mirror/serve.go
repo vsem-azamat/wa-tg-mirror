@@ -72,6 +72,19 @@ func serve(ctx context.Context, args []string) error {
 		case *events.Connected:
 			log.Info("whatsapp connected")
 			go b.SyncProfiles(ctx, dir)
+		case *events.GroupInfo:
+			hctx, done := context.WithTimeout(ctx, handleTimeout)
+			change := bridge.GroupChange{Chat: e.JID, TopicChanged: e.Topic != nil, Join: e.Join, Leave: e.Leave}
+			if e.Name != nil {
+				change.Name = e.Name.Name
+			}
+			b.HandleGroupInfo(hctx, change)
+			done()
+		case *events.CallOffer:
+			hctx, done := context.WithTimeout(ctx, handleTimeout)
+			_, video := e.Data.GetOptionalChildByTag("video")
+			b.HandleCall(hctx, e.CallCreator, e.GroupJID, video)
+			done()
 		case *events.Picture:
 			go b.PictureChanged(ctx, dir, e.JID)
 		case *events.Disconnected:
@@ -89,16 +102,31 @@ func serve(ctx context.Context, args []string) error {
 	var wg sync.WaitGroup
 	for _, bot := range all {
 		wg.Go(func() {
-			err := bot.Listen(ctx, log, func(ctx context.Context, m *telego.Message) {
-				in := tg.ToIncoming(m)
-				if in.From != cfg.OwnerID {
-					return
-				}
-				hctx, done := context.WithTimeout(ctx, handleTimeout)
-				defer done()
-				if problem := b.HandleTelegram(hctx, bot, in); problem != "" {
-					bot.Notify(ctx, log, in.Chat, in.Thread, in.ID, problem)
-				}
+			err := bot.Listen(ctx, log, tg.Handlers{
+				Message: func(ctx context.Context, m *telego.Message) {
+					in := tg.ToIncoming(m)
+					if in.From != cfg.OwnerID {
+						return
+					}
+					hctx, done := context.WithTimeout(ctx, handleTimeout)
+					defer done()
+					if problem := b.HandleTelegram(hctx, bot, in); problem != "" {
+						bot.Notify(ctx, log, in.Chat, in.Thread, in.ID, problem)
+					}
+				},
+				Edited: func(ctx context.Context, m *telego.Message) {
+					in := tg.ToIncoming(m)
+					hctx, done := context.WithTimeout(ctx, handleTimeout)
+					defer done()
+					if problem := b.HandleTelegramEdit(hctx, bot, in); problem != "" {
+						bot.Notify(ctx, log, in.Chat, in.Thread, in.ID, problem)
+					}
+				},
+				Reaction: func(ctx context.Context, r bridge.Reaction) {
+					hctx, done := context.WithTimeout(ctx, handleTimeout)
+					defer done()
+					b.HandleTelegramReaction(hctx, bot, r)
+				},
 			})
 			if err != nil {
 				cancel(fmt.Errorf("bot %s: %w", bot.Username(), err))
@@ -212,17 +240,16 @@ func (rt *runtime) newClient(ctx context.Context) error {
 
 func (rt *runtime) close() { _ = rt.db.Close() }
 
-// sendQR returns a callback that sends each pairing QR code to the owner as a photo.
+// sendQR returns a callback that shows each pairing QR code to the owner, in one
+// message whose photo is replaced as the codes rotate.
 func sendQR(ctx context.Context, log *slog.Logger, bot *tg.Bot, owner int64) func(code string) {
+	msg := bot.NewQRMessage(owner, log)
 	return func(code string) {
 		png, err := qrcode.Encode(code, qrcode.Medium, 512)
 		if err != nil {
 			log.Error("encode QR", "err", err)
 			return
 		}
-		caption := "Scan in WhatsApp → Settings → Linked devices → Link a device. A new code follows every 20 s; scan the latest."
-		if err := bot.SendPhoto(ctx, owner, png, caption); err != nil {
-			log.Error("send QR", "err", err)
-		}
+		msg.Show(ctx, png, "Scan in WhatsApp → Settings → Linked devices → Link a device. The code renews itself every 20 s.")
 	}
 }
