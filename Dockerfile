@@ -3,7 +3,10 @@ FROM golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
+# The heavy dependencies compile in a layer of their own, cached while only our code changes.
+RUN CGO_ENABLED=0 go build -trimpath modernc.org/sqlite go.mau.fi/whatsmeow github.com/mymmrac/telego
+COPY cmd ./cmd
+COPY internal ./internal
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/wa-tg-mirror ./cmd/wa-tg-mirror
 

@@ -1,10 +1,13 @@
 name: CI
 
+# Pull requests are checked here; merges are checked inside deploy.yml, which calls
+# this workflow before building, so main is not checked twice. The weekly run catches
+# vulnerabilities published between merges.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_call:
+  schedule:
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -14,10 +17,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint:
-    name: Lint
+  # One job: one Go cache that holds everything, and the single required status check.
+  check:
+    name: Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,32 +30,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
-      - run: make tidy-check lint
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
-      - run: make test
-
-  vuln:
-    name: Vulnerabilities
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
-      - run: make vuln
+      - name: Tidy, lint, test, vulnerabilities
+        run: make check

@@ -1,0 +1,17 @@
+# Weekly updates, grouped into one PR per ecosystem. Merge them with the squash button,
+# not "@dependabot merge": a run started by Dependabot gets no deploy secrets.
+# The golang image pins the toolchain (GOTOOLCHAIN=local): bump Dockerfile and go.mod together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups: { actions: { patterns: ["*"] } }
+  - package-ecosystem: gomod
+    directories: [/, /tools/lint, /tools/vuln]
+    schedule: { interval: weekly }
+    groups: { go: { patterns: ["*"] } }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+    groups: { docker: { patterns: ["*"] } }
