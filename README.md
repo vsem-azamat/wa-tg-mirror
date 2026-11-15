@@ -14,7 +14,7 @@ The bridge links to your WhatsApp account as a linked device (like WhatsApp Web)
 | A configured group | A Telegram group; members with a bot speak through it, others through the service bot with their name |
 | Any other chat | A topic of the overflow forum, unless ignored |
 
-Text, photos, videos, GIFs, voice messages, audio, files, stickers, locations and replies go both ways. Polls and contacts arrive as text. Messages you send from your phone are shown with a 📱 mark. Each person's bot takes their configured name and their WhatsApp profile photo.
+Text, photos, videos, GIFs, voice messages, audio, files, stickers, locations and replies go both ways. Polls and contacts arrive as text. Messages you send from your phone are shown with a 📱 mark. Each person's bot takes their configured name and their WhatsApp profile photo. `backfill` loads the last days of history into the mirrors.
 
 ## Quick start
 

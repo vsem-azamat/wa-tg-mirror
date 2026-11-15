@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mymmrac/telego"
 	qrcode "github.com/skip2/go-qrcode"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
@@ -48,39 +50,12 @@ func serve(ctx context.Context, args []string) error {
 		}
 	}
 
-	service, err := tg.New(ctx, log, cfg.ServiceBot.Token)
-	if err != nil {
-		return fmt.Errorf("service bot: %w", err)
-	}
-	bots := map[string]bridge.Telegram{}
-	all := []*tg.Bot{service}
-	for _, p := range cfg.People {
-		bot, err := tg.New(ctx, log, p.Bot.Token)
-		if err != nil {
-			return fmt.Errorf("bot of %s: %w", p.Name, err)
-		}
-		bots[p.Phone] = bot
-		all = append(all, bot)
-	}
-
-	db, err := wa.OpenDB(cfg.Database)
+	rt, err := openRuntime(ctx, log, cfg)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
-	st, err := store.Open(ctx, db)
-	if err != nil {
-		return err
-	}
-	cli, err := wa.NewClient(ctx, db, waLog.Stdout("wa", "WARN", false))
-	if err != nil {
-		return err
-	}
-	dir := wa.Directory{Client: cli}
-	b, err := bridge.New(log, cfg, cli, dir, st, service, bots)
-	if err != nil {
-		return err
-	}
+	defer rt.close()
+	cli, b, service, all, dir := rt.cli, rt.bridge, rt.service, rt.bots, rt.dir
 
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -183,3 +158,65 @@ func healthcheck(args []string) error {
 	}
 	return nil
 }
+
+// runtime is what serve and backfill share: the bots, the database, the WhatsApp
+// client and the bridge.
+type runtime struct {
+	service *tg.Bot
+	bots    []*tg.Bot // the service bot first, then one per person
+	byPhone map[string]bridge.Telegram
+	db      *sql.DB
+	store   *store.Store
+	cli     *whatsmeow.Client
+	dir     wa.Directory
+	bridge  *bridge.Bridge
+	cfg     *config.Config
+	log     *slog.Logger
+}
+
+func openRuntime(ctx context.Context, log *slog.Logger, cfg *config.Config) (*runtime, error) {
+	rt := &runtime{byPhone: map[string]bridge.Telegram{}, cfg: cfg, log: log}
+	var err error
+	rt.service, err = tg.New(ctx, log, cfg.ServiceBot.Token)
+	if err != nil {
+		return nil, fmt.Errorf("service bot: %w", err)
+	}
+	rt.bots = []*tg.Bot{rt.service}
+	for _, p := range cfg.People {
+		bot, err := tg.New(ctx, log, p.Bot.Token)
+		if err != nil {
+			return nil, fmt.Errorf("bot of %s: %w", p.Name, err)
+		}
+		rt.byPhone[p.Phone] = bot
+		rt.bots = append(rt.bots, bot)
+	}
+	rt.db, err = wa.OpenDB(cfg.Database)
+	if err != nil {
+		return nil, err
+	}
+	rt.store, err = store.Open(ctx, rt.db)
+	if err != nil {
+		rt.close()
+		return nil, err
+	}
+	if err := rt.newClient(ctx); err != nil {
+		rt.close()
+		return nil, err
+	}
+	return rt, nil
+}
+
+// newClient loads the WhatsApp device from the database (a new one when there is
+// none) and builds the bridge around it.
+func (rt *runtime) newClient(ctx context.Context) error {
+	cli, err := wa.NewClient(ctx, rt.db, waLog.Stdout("wa", "WARN", false))
+	if err != nil {
+		return err
+	}
+	rt.cli = cli
+	rt.dir = wa.Directory{Client: cli}
+	rt.bridge, err = bridge.New(rt.log, rt.cfg, cli, rt.dir, rt.store, rt.service, rt.byPhone)
+	return err
+}
+
+func (rt *runtime) close() { _ = rt.db.Close() }

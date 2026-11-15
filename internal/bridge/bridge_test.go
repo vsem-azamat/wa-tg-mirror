@@ -392,3 +392,37 @@ func TestOwnerServiceMessagesAreIgnored(t *testing.T) {
 		t.Fatal("service message sent to WhatsApp")
 	}
 }
+
+func TestHistoryIsStampedMarkedByDayAndNotRepeated(t *testing.T) {
+	f := newFixture(t)
+	a := pn(alicePhone)
+	day1 := waText("H1", "old", a, a, false)
+	day1.Info.Timestamp = time.Date(2026, 10, 20, 9, 5, 0, 0, time.UTC)
+	same := waText("H2", "same day", a, a, false)
+	same.Info.Timestamp = time.Date(2026, 10, 20, 18, 0, 0, 0, time.UTC)
+	day2 := waText("H3", "next", a, a, false)
+	day2.Info.Timestamp = time.Date(2026, 10, 21, 7, 0, 0, 0, time.UTC)
+
+	for _, m := range []*events.Message{day1, same, day2} {
+		if !f.b.HandleHistory(t.Context(), m) {
+			t.Fatalf("%s not mirrored", m.Info.ID)
+		}
+	}
+	var texts []string
+	for _, o := range f.alice.out {
+		texts = append(texts, o.Stamp+"|"+o.Text)
+	}
+	want := []string{
+		"|📅 Tue, 20 Oct 2026", "20.10 09:05|old", "20.10 18:00|same day",
+		"|📅 Wed, 21 Oct 2026", "21.10 07:00|next",
+	}
+	if strings.Join(texts, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s", strings.Join(texts, "\n"))
+	}
+	if f.b.HandleHistory(t.Context(), day1) {
+		t.Fatal("a mirrored message was sent again")
+	}
+	if len(f.wa.read) != 0 {
+		t.Fatal("history must not send read receipts")
+	}
+}

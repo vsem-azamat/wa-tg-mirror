@@ -48,7 +48,7 @@ The bridge handles private messages: message text, captions and file contents ne
 
 | Path | Contents |
 | --- | --- |
-| `cmd/wa-tg-mirror/` | The binary: `serve`, `discover`, `healthcheck`, `version` |
+| `cmd/wa-tg-mirror/` | The binary: `serve`, `backfill`, `discover`, `check`, `healthcheck`, `version` |
 | `internal/config/` | Config file: strict YAML, `${NAME}` tokens from the environment, validation |
 | `internal/bridge/` | Routing between WhatsApp and the bots, message conversion both ways, bot profiles |
 | `internal/store/` | SQLite tables of the bridge: message links, overflow topics, bot avatars |
