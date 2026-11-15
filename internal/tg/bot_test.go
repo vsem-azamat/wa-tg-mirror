@@ -70,9 +70,14 @@ func TestToIncoming(t *testing.T) {
 		t.Fatalf("unknown content %+v", unknown)
 	}
 
-	poll := ToIncoming(&telego.Message{Poll: &telego.Poll{}})
-	if poll.Unsupported == "" {
+	poll := ToIncoming(&telego.Message{Poll: &telego.Poll{Question: "Q", Options: []telego.PollOption{{Text: "a"}, {Text: "b"}}}})
+	if poll.Poll == nil || poll.Poll.Question != "Q" || len(poll.Poll.Options) != 2 {
 		t.Fatalf("poll %+v", poll)
+	}
+
+	dice := ToIncoming(&telego.Message{Dice: &telego.Dice{Emoji: "🎲"}})
+	if dice.Unsupported == "" {
+		t.Fatalf("dice %+v", dice)
 	}
 }
 
@@ -116,5 +121,11 @@ func TestNormalizeReaction(t *testing.T) {
 		if got := NormalizeReaction(in); got != want {
 			t.Errorf("%q → %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestFullHeaderPutsStampFirst(t *testing.T) {
+	if got := fullHeader(bridge.Outgoing{Stamp: "01.02 03:04", Header: "<b>A</b>"}); got != "<i>🕓 01.02 03:04</i> <b>A</b>" {
+		t.Fatalf("got %q", got)
 	}
 }

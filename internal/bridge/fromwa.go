@@ -26,7 +26,10 @@ type waContent struct {
 	// quoted is the ID of the WhatsApp message this one replies to.
 	quoted string
 	// skip marks messages that carry nothing to show, such as protocol messages.
-	skip bool
+	skip     bool
+	location *Location
+	contacts []Contact
+	poll     *Poll
 }
 
 // describeWA reads the content of a WhatsApp message without downloading media.
@@ -75,26 +78,35 @@ func describeWA(m *waE2E.Message) waContent {
 		return waContent{kind: KindSticker, media: s, mimeType: "image/webp", fileName: "sticker.webp", quoted: s.GetContextInfo().GetStanzaID()}
 	case m.LocationMessage != nil:
 		l := m.GetLocationMessage()
-		return waContent{kind: KindText, text: fmt.Sprintf("📍 %s\nhttps://maps.google.com/?q=%f,%f",
-			cmp.Or(l.GetName(), l.GetAddress()), l.GetDegreesLatitude(), l.GetDegreesLongitude())}
+		return waContent{kind: KindLocation, quoted: l.GetContextInfo().GetStanzaID(), location: &Location{
+			Lat: l.GetDegreesLatitude(), Lon: l.GetDegreesLongitude(), Title: l.GetName(), Address: l.GetAddress(),
+		}}
 	case m.LiveLocationMessage != nil:
 		l := m.GetLiveLocationMessage()
-		return waContent{kind: KindText, text: fmt.Sprintf("📍 live location\nhttps://maps.google.com/?q=%f,%f",
-			l.GetDegreesLatitude(), l.GetDegreesLongitude())}
+		return waContent{kind: KindLocation, text: l.GetCaption(), quoted: l.GetContextInfo().GetStanzaID(), location: &Location{
+			Lat: l.GetDegreesLatitude(), Lon: l.GetDegreesLongitude(), Live: true,
+		}}
 	case m.ContactMessage != nil:
-		return waContent{kind: KindText, text: "👤 " + m.GetContactMessage().GetDisplayName()}
+		c := m.GetContactMessage()
+		return waContent{kind: KindContact, quoted: c.GetContextInfo().GetStanzaID(), contacts: []Contact{contactOf(c)}}
+	case m.ContactsArrayMessage != nil:
+		a := m.GetContactsArrayMessage()
+		out := waContent{kind: KindContact, quoted: a.GetContextInfo().GetStanzaID()}
+		for _, c := range a.GetContacts() {
+			out.contacts = append(out.contacts, contactOf(c))
+		}
+		return out
 	case m.PollCreationMessageV4 != nil:
 		return describeWA(m.GetPollCreationMessageV4().GetMessage())
 	case m.PollCreationMessage != nil, m.PollCreationMessageV2 != nil, m.PollCreationMessageV3 != nil,
 		m.PollCreationMessageV5 != nil, m.PollCreationMessageV6 != nil:
 		p := cmp.Or(m.GetPollCreationMessage(), m.GetPollCreationMessageV2(), m.GetPollCreationMessageV3(),
 			m.GetPollCreationMessageV5(), m.GetPollCreationMessageV6())
-		var text strings.Builder
-		text.WriteString("📊 " + p.GetName())
+		poll := &Poll{Question: p.GetName(), Multi: p.GetSelectableOptionsCount() != 1}
 		for _, o := range p.GetOptions() {
-			text.WriteString("\n• " + o.GetOptionName())
+			poll.Options = append(poll.Options, o.GetOptionName())
 		}
-		return waContent{kind: KindText, text: text.String()}
+		return waContent{kind: KindPoll, quoted: p.GetContextInfo().GetStanzaID(), poll: poll}
 	case m.EventMessage != nil:
 		e := m.GetEventMessage()
 		return waContent{kind: KindText, text: "📅 " + e.GetName() + "\n" + e.GetDescription()}
@@ -105,6 +117,36 @@ func describeWA(m *waE2E.Message) waContent {
 	default:
 		return waContent{kind: KindText, text: "[unsupported WhatsApp message]"}
 	}
+}
+
+// contactOf reads a WhatsApp contact card; the phone number comes from the vCard.
+func contactOf(c *waE2E.ContactMessage) Contact {
+	return Contact{Name: c.GetDisplayName(), Phone: vcardPhone(c.GetVcard()), VCard: c.GetVcard()}
+}
+
+// vcardPhone returns the digits of the first TEL entry of a vCard, preferring the
+// WhatsApp ID that WhatsApp puts in it.
+func vcardPhone(vcard string) string {
+	for _, line := range strings.Split(vcard, "\n") {
+		line = strings.TrimSpace(line)
+		head, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.HasPrefix(strings.ToUpper(head), "TEL") && !strings.Contains(strings.ToUpper(head), ".TEL") {
+			continue
+		}
+		if _, waid, ok := strings.Cut(head, "waid="); ok {
+			value = waid
+		}
+		var digits strings.Builder
+		for _, r := range value {
+			if r >= '0' && r <= '9' {
+				digits.WriteRune(r)
+			}
+		}
+		if digits.Len() > 0 {
+			return digits.String()
+		}
+	}
+	return ""
 }
 
 // onlyContextInfo reports whether m carries nothing but its context info.
@@ -159,6 +201,12 @@ func kindName(k Kind) string {
 		return "file"
 	case KindSticker:
 		return "sticker"
+	case KindLocation:
+		return "location"
+	case KindContact:
+		return "contact"
+	case KindPoll:
+		return "poll"
 	default:
 		return "message"
 	}

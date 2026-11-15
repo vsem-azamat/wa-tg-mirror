@@ -40,6 +40,10 @@ type fakeWA struct {
 	read     []types.MessageID
 	download []byte
 	nextID   int
+	// voteFor and voteOpts record the last BuildPollVote; voteChoice is what DecryptPollVote returns.
+	voteFor    string
+	voteOpts   []string
+	voteChoice []string
 }
 
 type sentWA struct {
@@ -71,6 +75,23 @@ func (f *fakeWA) BuildReaction(_, sender types.JID, id types.MessageID, r string
 	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
 		Key: &waCommon.MessageKey{ID: proto.String(id), Participant: proto.String(sender.String())}, Text: proto.String(r),
 	}}
+}
+
+func (f *fakeWA) BuildPollCreation(name string, opts []string, selectable int) *waE2E.Message {
+	pc := &waE2E.PollCreationMessage{Name: proto.String(name), SelectableOptionsCount: proto.Uint32(uint32(selectable))}
+	for _, o := range opts {
+		pc.Options = append(pc.Options, &waE2E.PollCreationMessage_Option{OptionName: proto.String(o)})
+	}
+	return &waE2E.Message{PollCreationMessage: pc}
+}
+
+func (f *fakeWA) BuildPollVote(_ context.Context, info *types.MessageInfo, opts []string) (*waE2E.Message, error) {
+	f.voteFor, f.voteOpts = info.ID, opts
+	return &waE2E.Message{Conversation: proto.String("vote")}, nil
+}
+
+func (f *fakeWA) DecryptPollVote(context.Context, *events.Message) (*waE2E.PollVoteMessage, error) {
+	return &waE2E.PollVoteMessage{SelectedOptions: whatsmeow.HashPollOptions(f.voteChoice)}, nil
 }
 
 func (f *fakeWA) Upload(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
@@ -114,6 +135,11 @@ type fakeBot struct {
 	edits   []Outgoing
 	deleted []int
 	reacted []string // "msg:emoji"
+}
+
+func (b *fakeBot) SendPoll(ctx context.Context, out Outgoing) (int, string, error) {
+	id, err := b.Send(ctx, out)
+	return id, "poll-" + strconv.Itoa(id), err
 }
 
 func (b *fakeBot) Edit(_ context.Context, _ int64, msg int, out Outgoing) error {
@@ -573,9 +599,9 @@ func TestEditsReachLinksStoredBeforeSenderBotExisted(t *testing.T) {
 
 func TestLiveLocationAndUnshowableReactionsAreIgnored(t *testing.T) {
 	f := newFixture(t)
-	f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 7, From: owner, Location: &[2]float64{1, 2}})
+	f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 7, From: owner, Location: &Location{Lat: 1, Lon: 2}})
 	n := len(f.wa.sent)
-	f.b.HandleTelegramEdit(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 7, From: owner, Location: &[2]float64{1, 3}})
+	f.b.HandleTelegramEdit(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 7, From: owner, Location: &Location{Lat: 1, Lon: 3}})
 	f.b.HandleTelegramReaction(t.Context(), f.alice, Reaction{Chat: owner, Msg: 7, From: owner, Other: true})
 	if len(f.wa.sent) != n {
 		t.Fatalf("sent %d more", len(f.wa.sent)-n)
@@ -614,5 +640,77 @@ func TestUnknownCommandInGroupIsAnsweredOnce(t *testing.T) {
 	}
 	if p := f.b.HandleTelegram(t.Context(), f.service, Incoming{Chat: groupChat, ID: 1, From: owner, Command: "foo"}); p == "" {
 		t.Fatal("service bot must answer")
+	}
+}
+
+func TestPollsVotesContactsAndLocations(t *testing.T) {
+	f := newFixture(t)
+	g, _ := types.ParseJID(groupJID)
+	poll := waText("P1", "", g, pn(bobPhone), false)
+	poll.Message = &waE2E.Message{PollCreationMessageV3: &waE2E.PollCreationMessage{
+		Name: proto.String("Dinner?"), SelectableOptionsCount: proto.Uint32(1),
+		Options: []*waE2E.PollCreationMessage_Option{{OptionName: proto.String("Fri")}, {OptionName: proto.String("Sat")}},
+	}}
+	f.b.HandleWhatsApp(t.Context(), poll)
+	if out := last(t, f.bob); out.Kind != KindPoll || out.Poll.Question != "Dinner?" || out.Poll.Multi || len(out.Poll.Options) != 2 {
+		t.Fatalf("poll %+v", out)
+	}
+
+	// A WhatsApp vote becomes a reply naming the choice, from the voter's bot.
+	f.wa.voteChoice = []string{"Sat"}
+	vote := waText("V1", "", g, pn(alicePhone), false)
+	vote.Message = &waE2E.Message{PollUpdateMessage: &waE2E.PollUpdateMessage{
+		PollCreationMessageKey: &waCommon.MessageKey{ID: proto.String("P1")},
+	}}
+	f.b.HandleWhatsApp(t.Context(), vote)
+	if out := last(t, f.alice); out.Text != "🗳 Sat" || out.ReplyTo != 1 {
+		t.Fatalf("vote note %+v", out)
+	}
+
+	// The owner's vote in Telegram reaches WhatsApp with the option names.
+	f.b.HandlePollAnswer(t.Context(), PollAnswer{PollID: "poll-1", From: owner, Options: []int{0}})
+	if f.wa.voteFor != "P1" || len(f.wa.voteOpts) != 1 || f.wa.voteOpts[0] != "Fri" {
+		t.Fatalf("vote %q %v", f.wa.voteFor, f.wa.voteOpts)
+	}
+
+	a := pn(alicePhone)
+	contact := waText("C1", "", a, a, false)
+	contact.Message = &waE2E.Message{ContactMessage: &waE2E.ContactMessage{
+		DisplayName: proto.String("Uncle"), Vcard: proto.String("BEGIN:VCARD\nTEL;type=CELL;waid=420111222333:+420 111 222 333\nEND:VCARD"),
+	}}
+	f.b.HandleWhatsApp(t.Context(), contact)
+	if out := last(t, f.alice); out.Kind != KindContact || out.Contacts[0].Phone != "420111222333" {
+		t.Fatalf("contact %+v", out)
+	}
+
+	f.b.HandleTelegram(t.Context(), f.alice, Incoming{
+		Chat: owner, Private: true, ID: 90, From: owner,
+		Location: &Location{Lat: 50.1, Lon: 14.4, Title: "Cafe"},
+	})
+	if l := f.wa.sent[len(f.wa.sent)-1].msg.GetLocationMessage(); l.GetName() != "Cafe" || l.GetDegreesLatitude() != 50.1 {
+		t.Fatalf("location %v", l)
+	}
+	f.b.HandleTelegram(t.Context(), f.alice, Incoming{
+		Chat: owner, Private: true, ID: 91, From: owner,
+		Poll: &Poll{Question: "Q", Options: []string{"a", "b"}, Multi: true},
+	})
+	if pc := f.wa.sent[len(f.wa.sent)-1].msg.GetPollCreationMessage(); pc.GetSelectableOptionsCount() != 0 || len(pc.GetOptions()) != 2 {
+		t.Fatalf("poll %v", pc)
+	}
+}
+
+func TestLiveLocationUpdatesAreShownOnce(t *testing.T) {
+	f := newFixture(t)
+	a := pn(alicePhone)
+	for i, ts := range []time.Time{time.Unix(1000, 0), time.Unix(1060, 0)} {
+		m := waText("L"+strconv.Itoa(i), "", a, a, false)
+		m.Info.Timestamp = ts
+		m.Message = &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{
+			DegreesLatitude: proto.Float64(1), DegreesLongitude: proto.Float64(2), SequenceNumber: proto.Int64(int64(i)),
+		}}
+		f.b.HandleWhatsApp(t.Context(), m)
+	}
+	if len(f.alice.out) != 1 || f.alice.out[0].Kind != KindLocation {
+		t.Fatalf("out %+v", f.alice.out)
 	}
 }

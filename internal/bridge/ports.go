@@ -9,6 +9,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 )
 
 // WhatsApp is the part of the WhatsApp client the bridge uses.
@@ -20,6 +21,9 @@ type WhatsApp interface {
 	BuildEdit(chat types.JID, id types.MessageID, newContent *waE2E.Message) *waE2E.Message
 	BuildRevoke(chat, sender types.JID, id types.MessageID) *waE2E.Message
 	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
+	BuildPollCreation(name string, optionNames []string, selectableOptionCount int) *waE2E.Message
+	BuildPollVote(ctx context.Context, pollInfo *types.MessageInfo, optionNames []string) (*waE2E.Message, error)
+	DecryptPollVote(ctx context.Context, vote *events.Message) (*waE2E.PollVoteMessage, error)
 }
 
 // Directory answers who is who on WhatsApp.
@@ -47,7 +51,34 @@ const (
 	KindAudio
 	KindDocument
 	KindSticker
+	KindLocation
+	KindContact
+	KindPoll
 )
+
+// Location is a point on the map, with a place name for a venue.
+type Location struct {
+	Lat, Lon float64
+	Title    string
+	Address  string
+	// Live marks a shared live location; only its first position is mirrored.
+	Live bool
+}
+
+// Contact is a shared contact card.
+type Contact struct {
+	Name  string
+	Phone string // international, digits only; may be empty
+	VCard string
+}
+
+// Poll is a poll's question and options.
+type Poll struct {
+	Question string
+	Options  []string
+	// Multi allows choosing more than one option.
+	Multi bool
+}
 
 // Outgoing is one message for a bot to send.
 type Outgoing struct {
@@ -64,6 +95,9 @@ type Outgoing struct {
 	Data     []byte
 	FileName string
 	MimeType string
+	Location *Location
+	Contacts []Contact
+	Poll     *Poll
 }
 
 // IncomingFile is a file attached to a message the owner sent in Telegram.
@@ -90,6 +124,15 @@ type Telegram interface {
 	Delete(ctx context.Context, chat int64, msg int) error
 	// React sets the bot's reaction on a message; "" removes it.
 	React(ctx context.Context, chat int64, msg int, emoji string) error
+	// SendPoll sends out.Poll as a non-anonymous poll and returns its message and poll IDs.
+	SendPoll(ctx context.Context, out Outgoing) (int, string, error)
+}
+
+// PollAnswer is the owner's vote in a mirrored poll.
+type PollAnswer struct {
+	PollID  string
+	From    int64
+	Options []int // chosen option indexes; empty when the vote was retracted
 }
 
 // Profile is a bot that can change its own name and photo.
@@ -128,8 +171,10 @@ type Incoming struct {
 	Kind    Kind
 	Text    string // text or caption
 	File    *IncomingFile
-	// Location is set for a shared location: latitude, longitude.
-	Location *[2]float64
+	// Location is set for a shared location or venue.
+	Location *Location
+	Contact  *Contact
+	Poll     *Poll
 	// Unsupported names a message type the bridge cannot send, such as an animated sticker.
 	Unsupported string
 	// Service marks a Telegram service message (members, title, topics), never sent on.

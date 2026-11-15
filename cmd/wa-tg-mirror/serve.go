@@ -127,6 +127,11 @@ func serve(ctx context.Context, args []string) error {
 					defer done()
 					b.HandleTelegramReaction(hctx, bot, r)
 				},
+				PollAnswer: func(ctx context.Context, a bridge.PollAnswer) {
+					hctx, done := context.WithTimeout(ctx, handleTimeout)
+					defer done()
+					b.HandlePollAnswer(hctx, a)
+				},
 			})
 			if err != nil {
 				cancel(fmt.Errorf("bot %s: %w", bot.Username(), err))

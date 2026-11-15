@@ -81,6 +81,8 @@ type Bridge struct {
 	loc *time.Location
 	// lastDay is the last day marked in each Telegram chat during a history run.
 	lastDay map[string]string
+	// lives holds when each sender last started a live location in a chat.
+	lives map[string]time.Time
 }
 
 // New builds a bridge. bots maps each person's phone to their bot.
@@ -92,6 +94,7 @@ func New(log *slog.Logger, cfg *config.Config, wa WhatsApp, dir Directory, st *s
 		byPhone: map[string]*person{}, byBot: map[int64]*person{}, groups: map[string]*group{},
 		byTGChat: map[int64]*group{}, ignored: map[string]bool{}, sent: map[types.MessageID]bool{},
 		unread: map[string][]pending{}, notified: map[int64]bool{}, lastDay: map[string]string{},
+		lives: map[string]time.Time{},
 	}
 	loc, err := time.LoadLocation(cfg.TimeZone)
 	if err != nil {
@@ -185,17 +188,27 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 			b.reacted(ctx, chat, sender, info, r)
 			return false
 		}
+		if evt.Message.GetPollUpdateMessage() != nil {
+			b.voted(ctx, evt, chat, sender)
+			return false
+		}
 	}
 	c := describeWA(evt.Message)
 	if c.skip {
 		return false
+	}
+	if c.location != nil && c.location.Live && !history && b.liveSeen(chat, sender, info.Timestamp) {
+		return false // a position update of a live location already shown
 	}
 	if history {
 		if done, err := b.store.HasWhatsApp(ctx, chat.String(), info.ID); err != nil || done {
 			return false
 		}
 	}
-	out := Outgoing{Kind: c.kind, Text: c.text, FileName: c.fileName, MimeType: c.mimeType}
+	out := Outgoing{
+		Kind: c.kind, Text: c.text, FileName: c.fileName, MimeType: c.mimeType,
+		Location: c.location, Contacts: c.contacts, Poll: c.poll,
+	}
 	bot, ok := b.route(ctx, chat, sender, info, &out)
 	if !ok {
 		return false
@@ -215,10 +228,18 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 		out.Kind, out.Data = KindText, nil
 		out.Text = fmt.Sprintf("[%s could not be downloaded]\n%s", kindName(c.kind), c.text)
 	}
-	bot, msgID, err := b.deliver(ctx, bot, chat, sender, info, out)
+	bot, msgID, pollID, err := b.deliver(ctx, bot, chat, sender, info, out)
 	if err != nil {
 		b.log.Error("send to Telegram", "chat", chat.User, "kind", kindName(out.Kind), "err", err)
 		return false
+	}
+	if c.poll != nil {
+		ref := store.PollRef{
+			WAChat: chat.String(), WAID: info.ID, WASender: info.Sender.ToNonAD().String(), Options: c.poll.Options, TGPoll: pollID,
+		}
+		if err := b.store.PutPoll(ctx, ref); err != nil {
+			b.log.Error("store poll", "err", err)
+		}
 	}
 	link := store.Link{
 		Bot: bot.ID(), TGChat: out.Chat, TGMsg: msgID, WAChat: chat.String(), WAID: info.ID,
@@ -229,6 +250,24 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 	}
 	if !info.IsFromMe && !history {
 		b.addUnread(chat.String(), pending{id: info.ID, chat: info.Chat, sender: info.Sender, at: info.Timestamp})
+	}
+	return true
+}
+
+// liveWindow is how long a live location counts as the same share; WhatsApp shares
+// last at most eight hours.
+const liveWindow = 8 * time.Hour
+
+// liveSeen reports whether sender shared a live location in chat within liveWindow
+// before at, and remembers this one.
+func (b *Bridge) liveSeen(chat, sender types.JID, at time.Time) bool {
+	key := chat.String() + "/" + sender.String()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	last, ok := b.lives[key]
+	if !ok || at.Sub(last) > liveWindow {
+		b.lives[key] = at
+		return false
 	}
 	return true
 }
@@ -253,11 +292,11 @@ func (b *Bridge) markDay(ctx context.Context, bot Telegram, out Outgoing, at tim
 // that sent the message.
 func (b *Bridge) deliver(ctx context.Context, bot Telegram, chat, sender types.JID, info types.MessageInfo,
 	out Outgoing,
-) (Telegram, int, error) {
-	id, err := bot.Send(ctx, out)
+) (Telegram, int, string, error) {
+	id, poll, err := send(ctx, bot, out)
 	switch {
 	case err == nil:
-		return bot, id, nil
+		return bot, id, poll, nil
 	case errors.Is(err, ErrForbidden) && bot.ID() != b.service.ID():
 		name := "the bot"
 		if p, ok := b.byBot[bot.ID()]; ok {
@@ -275,21 +314,30 @@ func (b *Bridge) deliver(ctx context.Context, bot Telegram, chat, sender types.J
 		if out.Chat == b.owner && info.IsFromMe {
 			out.Header = ownHeader + " → <b>" + html.EscapeString(b.dir.Name(ctx, chat)) + "</b>"
 		}
-		id, err = b.service.Send(ctx, out)
-		return b.service, id, err
+		id, poll, err = send(ctx, b.service, out)
+		return b.service, id, poll, err
 	case errors.Is(err, ErrTopicGone) && out.Chat == b.overflow:
 		if err := b.store.DeleteTopic(ctx, chat.String()); err != nil {
-			return bot, 0, err
+			return bot, 0, "", err
 		}
 		thread, err := b.topic(ctx, chat, info)
 		if err != nil {
-			return bot, 0, err
+			return bot, 0, "", err
 		}
 		out.Thread, out.ReplyTo = thread, 0
-		id, err = bot.Send(ctx, out)
-		return bot, id, err
+		id, poll, err = send(ctx, bot, out)
+		return bot, id, poll, err
 	}
-	return bot, 0, err
+	return bot, 0, "", err
+}
+
+// send posts out through bot; polls go through SendPoll and return their poll ID.
+func send(ctx context.Context, bot Telegram, out Outgoing) (int, string, error) {
+	if out.Kind == KindPoll {
+		return bot.SendPoll(ctx, out)
+	}
+	id, err := bot.Send(ctx, out)
+	return id, "", err
 }
 
 // notifyOnce tells the owner something about a bot once per run.
@@ -461,6 +509,12 @@ func (b *Bridge) HandleTelegram(ctx context.Context, bot Telegram, in Incoming) 
 		return "⚠️ Not sent to WhatsApp: " + err.Error()
 	}
 	b.rememberSent(resp.ID)
+	if in.Poll != nil {
+		ref := store.PollRef{WAChat: target.String(), WAID: resp.ID, WASender: b.dir.Own().String(), Options: in.Poll.Options}
+		if err := b.store.PutPoll(ctx, ref); err != nil {
+			b.log.Error("store poll", "err", err)
+		}
+	}
 	link := store.Link{
 		Bot: bot.ID(), TGChat: in.Chat, TGMsg: in.ID, WAChat: target.String(), WAID: resp.ID,
 		WASender: b.dir.Own().String(), Text: truncate(in.Text, quoteLen),

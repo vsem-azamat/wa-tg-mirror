@@ -65,14 +65,9 @@ func (b *Bot) Username() string { return b.name }
 // Send sends out and returns the ID of its first message.
 func (b *Bot) Send(ctx context.Context, out bridge.Outgoing) (int, error) {
 	text := out.Text
-	header := out.Header
-	if out.Stamp != "" {
-		stamp := "<i>🕓 " + html.EscapeString(out.Stamp) + "</i>"
-		if header == "" {
-			header = stamp
-		} else {
-			header = stamp + " " + header
-		}
+	header := fullHeader(out)
+	if out.Kind == bridge.KindLocation || out.Kind == bridge.KindContact {
+		return b.sendNative(ctx, out, header, text)
 	}
 	if out.Kind == bridge.KindText || out.Kind == bridge.KindSticker {
 		if out.Kind == bridge.KindSticker && header != "" {
@@ -106,6 +101,21 @@ func (b *Bot) Send(ctx context.Context, out bridge.Outgoing) (int, error) {
 	}
 	return id, nil
 }
+
+// fullHeader is the header with the time stamp of a history message in front.
+func fullHeader(out bridge.Outgoing) string {
+	if out.Stamp == "" {
+		return out.Header
+	}
+	stamp := "<i>🕓 " + html.EscapeString(out.Stamp) + "</i>"
+	if out.Header == "" {
+		return stamp
+	}
+	return stamp + " " + out.Header
+}
+
+// maxVCard is the largest vCard Telegram accepts with a contact.
+const maxVCard = 2048
 
 // compose joins the trusted HTML header with escaped text.
 func compose(header, text string) string {
@@ -226,7 +236,7 @@ func (b *Bot) sendMediaOnce(ctx context.Context, out bridge.Outgoing, caption st
 			ChatID: chat, MessageThreadID: out.Thread, Document: file,
 			Caption: caption, ParseMode: telego.ModeHTML, ReplyParameters: reply,
 		})
-	case bridge.KindText:
+	case bridge.KindText, bridge.KindLocation, bridge.KindContact, bridge.KindPoll:
 	}
 	return nil, fmt.Errorf("unknown kind %d", out.Kind)
 }
@@ -246,7 +256,7 @@ func fileName(out bridge.Outgoing) string {
 		return "audio" + extension(out.MimeType, ".mp3")
 	case bridge.KindSticker:
 		return "sticker.webp"
-	case bridge.KindText, bridge.KindDocument:
+	case bridge.KindText, bridge.KindDocument, bridge.KindLocation, bridge.KindContact, bridge.KindPoll:
 	}
 	return "file"
 }
@@ -314,7 +324,7 @@ func (b *Bot) SendPhoto(ctx context.Context, chat int64, png []byte, caption str
 // Listen long-polls updates and passes them to h until ctx ends.
 func (b *Bot) Listen(ctx context.Context, log *slog.Logger, h Handlers) error {
 	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
-		Timeout: 30, AllowedUpdates: []string{"message", "edited_message", "message_reaction"},
+		Timeout: 30, AllowedUpdates: []string{"message", "edited_message", "message_reaction", "poll_answer"},
 	})
 	if err != nil {
 		return fmt.Errorf("start long polling: %w", err)
@@ -327,10 +337,141 @@ func (b *Bot) Listen(ctx context.Context, log *slog.Logger, h Handlers) error {
 			h.Edited(ctx, u.EditedMessage)
 		case u.MessageReaction != nil && h.Reaction != nil:
 			h.Reaction(ctx, ToReaction(u.MessageReaction))
+		case u.PollAnswer != nil && h.PollAnswer != nil:
+			a := bridge.PollAnswer{PollID: u.PollAnswer.PollID, Options: u.PollAnswer.OptionIDs}
+			if u.PollAnswer.User != nil {
+				a.From = u.PollAnswer.User.ID
+			}
+			h.PollAnswer(ctx, a)
 		}
 	}
 	log.Info("long polling stopped", "bot", b.name)
 	return nil
+}
+
+// sendNative sends locations and contacts, which carry no caption: the header and
+// text go first in a message of their own.
+func (b *Bot) sendNative(ctx context.Context, out bridge.Outgoing, header, text string) (int, error) {
+	first := 0
+	if header != "" || text != "" {
+		id, err := b.sendText(ctx, out, header, text)
+		if err != nil {
+			return 0, err
+		}
+		first, out.ReplyTo = id, 0
+	}
+	chat := tu.ID(out.Chat)
+	reply := replyTo(out.ReplyTo)
+	var sent []*telego.Message
+	switch {
+	case out.Kind == bridge.KindLocation && out.Location != nil:
+		l := out.Location
+		m, err := retry(ctx, func() (*telego.Message, error) {
+			if l.Title != "" || l.Address != "" {
+				return b.api.SendVenue(ctx, &telego.SendVenueParams{
+					ChatID: chat, MessageThreadID: out.Thread, Latitude: l.Lat, Longitude: l.Lon,
+					Title: cmpOr(l.Title, l.Address), Address: cmpOr(l.Address, l.Title), ReplyParameters: reply,
+				})
+			}
+			return b.api.SendLocation(ctx, &telego.SendLocationParams{
+				ChatID: chat, MessageThreadID: out.Thread, Latitude: l.Lat, Longitude: l.Lon, ReplyParameters: reply,
+			})
+		})
+		if err != nil {
+			return first, fmt.Errorf("send location: %w", err)
+		}
+		sent = append(sent, m)
+	case out.Kind == bridge.KindContact:
+		for _, c := range out.Contacts {
+			phone := c.Phone
+			if phone != "" {
+				phone = "+" + phone
+			}
+			vcard := c.VCard
+			if len(vcard) > maxVCard {
+				vcard = "" // a card with a photo or many fields: name and number still go through
+			}
+			m, err := retry(ctx, func() (*telego.Message, error) {
+				return b.api.SendContact(ctx, &telego.SendContactParams{
+					ChatID: chat, MessageThreadID: out.Thread, PhoneNumber: cmpOr(phone, "-"), FirstName: cmpOr(c.Name, "Contact"),
+					Vcard: vcard, ReplyParameters: reply,
+				})
+			})
+			if err != nil {
+				return first, fmt.Errorf("send contact: %w", err)
+			}
+			sent = append(sent, m)
+			reply = nil
+		}
+	}
+	if first == 0 && len(sent) > 0 {
+		first = sent[0].MessageID
+	}
+	return first, nil
+}
+
+// maxPollOptions is the most options a Telegram poll may have.
+const maxPollOptions = 12
+
+// SendPoll sends a non-anonymous poll, preceded by the header when there is one.
+// Telegram allows 2 to 12 options of up to 100 characters and a question of 300.
+func (b *Bot) SendPoll(ctx context.Context, out bridge.Outgoing) (int, string, error) {
+	p := out.Poll
+	header := fullHeader(out)
+	if p == nil || len(p.Options) < 2 {
+		id, err := b.sendText(ctx, out, header, "📊 "+pollText(p))
+		return id, "", err
+	}
+	note := ""
+	if extra := len(p.Options) - maxPollOptions; extra > 0 {
+		note = fmt.Sprintf("Telegram shows %d options; also in WhatsApp: %s", maxPollOptions, strings.Join(p.Options[maxPollOptions:], ", "))
+	}
+	if header != "" || note != "" {
+		if _, err := b.sendText(ctx, out, header, note); err != nil {
+			return 0, "", err
+		}
+		out.ReplyTo = 0
+	}
+	opts := make([]telego.InputPollOption, 0, min(len(p.Options), maxPollOptions))
+	for _, o := range p.Options[:min(len(p.Options), maxPollOptions)] {
+		opts = append(opts, telego.InputPollOption{Text: truncateRunes(o, 100)})
+	}
+	anonymous := false
+	m, err := retry(ctx, func() (*telego.Message, error) {
+		return b.api.SendPoll(ctx, &telego.SendPollParams{
+			ChatID: tu.ID(out.Chat), MessageThreadID: out.Thread, Question: truncateRunes(p.Question, 300), Options: opts,
+			IsAnonymous: &anonymous, AllowsMultipleAnswers: p.Multi, ReplyParameters: replyTo(out.ReplyTo),
+		})
+	})
+	if err != nil {
+		return 0, "", fmt.Errorf("send poll: %w", err)
+	}
+	if m.Poll == nil {
+		return m.MessageID, "", nil
+	}
+	return m.MessageID, m.Poll.ID, nil
+}
+
+func pollText(p *bridge.Poll) string {
+	if p == nil {
+		return "poll"
+	}
+	return p.Question + "\n• " + strings.Join(p.Options, "\n• ")
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // ToIncoming converts a Telegram message to the bridge's form.
@@ -391,8 +532,22 @@ func ToIncoming(m *telego.Message) bridge.Incoming {
 		} else {
 			in.Kind, in.File = bridge.KindSticker, &bridge.IncomingFile{FileID: s.FileID, MimeType: "image/webp"}
 		}
+	case m.Venue != nil:
+		v := m.Venue
+		in.Location = &bridge.Location{Lat: v.Location.Latitude, Lon: v.Location.Longitude, Title: v.Title, Address: v.Address}
 	case m.Location != nil:
-		in.Location = &[2]float64{m.Location.Latitude, m.Location.Longitude}
+		in.Location = &bridge.Location{Lat: m.Location.Latitude, Lon: m.Location.Longitude}
+	case m.Contact != nil:
+		c := m.Contact
+		name := strings.TrimSpace(c.FirstName + " " + c.LastName)
+		in.Contact = &bridge.Contact{Name: name, Phone: strings.TrimPrefix(c.PhoneNumber, "+"), VCard: c.Vcard}
+	case m.Poll != nil:
+		p := m.Poll
+		poll := &bridge.Poll{Question: p.Question, Multi: p.AllowsMultipleAnswers}
+		for _, o := range p.Options {
+			poll.Options = append(poll.Options, o.Text)
+		}
+		in.Poll = poll
 	case isService(m):
 		// A member joined, the title changed, a topic was edited...
 		in.Service = true

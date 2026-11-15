@@ -108,9 +108,10 @@ func wrap(what string, err error) error {
 
 // Handlers receive what a bot's long poll delivers.
 type Handlers struct {
-	Message  func(context.Context, *telego.Message)
-	Edited   func(context.Context, *telego.Message)
-	Reaction func(context.Context, bridge.Reaction)
+	Message    func(context.Context, *telego.Message)
+	Edited     func(context.Context, *telego.Message)
+	Reaction   func(context.Context, bridge.Reaction)
+	PollAnswer func(context.Context, bridge.PollAnswer)
 }
 
 // ToReaction converts a reaction update; the new reaction is the first emoji, if any.

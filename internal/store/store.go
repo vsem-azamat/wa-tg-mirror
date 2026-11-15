@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -58,6 +59,14 @@ CREATE TABLE IF NOT EXISTS mirror_topics (
 	tg_chat   INTEGER NOT NULL,
 	thread_id INTEGER NOT NULL,
 	UNIQUE (tg_chat, thread_id)
+);
+CREATE TABLE IF NOT EXISTS mirror_polls (
+	wa_chat   TEXT NOT NULL,
+	wa_id     TEXT NOT NULL,
+	wa_sender TEXT NOT NULL,
+	options   TEXT NOT NULL,
+	tg_poll   TEXT UNIQUE,
+	PRIMARY KEY (wa_chat, wa_id)
 );
 CREATE TABLE IF NOT EXISTS mirror_avatars (
 	bot        INTEGER PRIMARY KEY,
@@ -248,4 +257,62 @@ func (s *Store) DeleteLinks(ctx context.Context, waChat, waID string) error {
 		return fmt.Errorf("delete links: %w", err)
 	}
 	return nil
+}
+
+// PollRef is a WhatsApp poll with its options and the Telegram poll that mirrors it.
+type PollRef struct {
+	WAChat   string
+	WAID     string
+	WASender string
+	Options  []string
+	TGPoll   string // empty for polls the owner created in Telegram
+}
+
+// PutPoll records a poll.
+func (s *Store) PutPoll(ctx context.Context, p PollRef) error {
+	opts, err := json.Marshal(p.Options)
+	if err != nil {
+		return fmt.Errorf("encode poll options: %w", err)
+	}
+	var tgPoll any
+	if p.TGPoll != "" {
+		tgPoll = p.TGPoll
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT OR REPLACE INTO mirror_polls (wa_chat, wa_id, wa_sender, options, tg_poll)
+		VALUES (?, ?, ?, ?, ?)`, p.WAChat, p.WAID, p.WASender, string(opts), tgPoll)
+	if err != nil {
+		return fmt.Errorf("put poll: %w", err)
+	}
+	return nil
+}
+
+// PollByWhatsApp finds a poll by its WhatsApp message.
+func (s *Store) PollByWhatsApp(ctx context.Context, waChat, waID string) (PollRef, error) {
+	return s.poll(ctx, `wa_chat = ? AND wa_id = ?`, waChat, waID)
+}
+
+// PollByTelegram finds a poll by the ID of its Telegram poll.
+func (s *Store) PollByTelegram(ctx context.Context, tgPoll string) (PollRef, error) {
+	return s.poll(ctx, `tg_poll = ?`, tgPoll)
+}
+
+func (s *Store) poll(ctx context.Context, where string, args ...any) (PollRef, error) {
+	var (
+		p      PollRef
+		opts   string
+		tgPoll sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT wa_chat, wa_id, wa_sender, options, tg_poll FROM mirror_polls WHERE `+where, args...).
+		Scan(&p.WAChat, &p.WAID, &p.WASender, &opts, &tgPoll)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PollRef{}, ErrNotFound
+	}
+	if err != nil {
+		return PollRef{}, fmt.Errorf("find poll: %w", err)
+	}
+	p.TGPoll = tgPoll.String
+	if err := json.Unmarshal([]byte(opts), &p.Options); err != nil {
+		return PollRef{}, fmt.Errorf("decode poll options: %w", err)
+	}
+	return p, nil
 }
