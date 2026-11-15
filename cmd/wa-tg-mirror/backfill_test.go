@@ -45,10 +45,20 @@ func TestHistoryBufferKeepsRecentMessagesInOrder(t *testing.T) {
 	}})
 
 	var ids []string
-	for _, m := range h.sorted() {
+	for _, m := range h.take() {
 		ids = append(ids, m.Info.ID)
 	}
 	if len(ids) != 3 || ids[0] != "mid" || ids[1] != "new" || ids[2] != "live" {
 		t.Fatalf("ids %v", ids)
+	}
+	// A message handed out once is not handed out again, while a new one is.
+	h.handle(&events.Message{Info: types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: types.NewJID("111", types.DefaultUserServer)}, ID: "live", Timestamp: now,
+	}})
+	h.handle(&events.Message{Info: types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: types.NewJID("111", types.DefaultUserServer)}, ID: "later", Timestamp: now,
+	}})
+	if again := h.take(); len(again) != 1 || again[0].Info.ID != "later" {
+		t.Fatalf("second take %v", again)
 	}
 }
