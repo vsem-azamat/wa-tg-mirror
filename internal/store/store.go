@@ -182,3 +182,13 @@ func (s *Store) DeleteTopic(ctx context.Context, waChat string) error {
 	}
 	return nil
 }
+
+// HasWhatsApp reports whether a WhatsApp message is mirrored already.
+func (s *Store) HasWhatsApp(ctx context.Context, waChat, waID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM mirror_links WHERE wa_chat = ? AND wa_id = ?`, waChat, waID).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("find link: %w", err)
+	}
+	return n > 0, nil
+}

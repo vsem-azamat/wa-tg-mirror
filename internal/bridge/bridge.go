@@ -77,6 +77,10 @@ type Bridge struct {
 	unread  map[string][]pending // canonical chat → messages to mark read
 	// notified holds the bots the owner was already told about.
 	notified map[int64]bool
+	// loc is the time zone of history time stamps.
+	loc *time.Location
+	// lastDay is the last day marked in each Telegram chat during a history run.
+	lastDay map[string]string
 }
 
 // New builds a bridge. bots maps each person's phone to their bot.
@@ -87,8 +91,13 @@ func New(log *slog.Logger, cfg *config.Config, wa WhatsApp, dir Directory, st *s
 		log: log, wa: wa, dir: dir, store: st, owner: cfg.OwnerID, service: service, markRd: cfg.MarkRead,
 		byPhone: map[string]*person{}, byBot: map[int64]*person{}, groups: map[string]*group{},
 		byTGChat: map[int64]*group{}, ignored: map[string]bool{}, sent: map[types.MessageID]bool{},
-		unread: map[string][]pending{}, notified: map[int64]bool{},
+		unread: map[string][]pending{}, notified: map[int64]bool{}, lastDay: map[string]string{},
 	}
+	loc, err := time.LoadLocation(cfg.TimeZone)
+	if err != nil {
+		return nil, fmt.Errorf("time zone: %w", err)
+	}
+	b.loc = loc
 	for _, p := range cfg.People {
 		bot, ok := bots[p.Phone]
 		if !ok {
@@ -145,26 +154,47 @@ func (b *Bridge) wasSent(id types.MessageID) bool {
 
 // HandleWhatsApp mirrors one WhatsApp message into Telegram.
 func (b *Bridge) HandleWhatsApp(ctx context.Context, evt *events.Message) {
+	b.mirror(ctx, evt, false)
+}
+
+// HandleHistory mirrors one message from the history sync, marked with its time
+// and preceded by a day marker when the day changes in its Telegram chat. A message
+// that is mirrored already is skipped. It reports whether a message was sent.
+func (b *Bridge) HandleHistory(ctx context.Context, evt *events.Message) bool {
+	return b.mirror(ctx, evt, true)
+}
+
+func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) bool {
 	info := evt.Info
 	if info.Chat.Server == types.BroadcastServer || info.Chat.Server == types.NewsletterServer {
-		return
+		return false
 	}
-	if info.IsFromMe && b.wasSent(info.ID) {
-		return
+	if !history && info.IsFromMe && b.wasSent(info.ID) {
+		return false
 	}
 	c := describeWA(evt.Message)
 	if c.skip {
-		return
+		return false
 	}
 	chat := b.canonical(ctx, info.Chat)
 	sender := b.canonical(ctx, info.Sender)
 	if info.IsFromMe {
 		sender = b.dir.Own()
 	}
+	if history {
+		if done, err := b.store.HasWhatsApp(ctx, chat.String(), info.ID); err != nil || done {
+			return false
+		}
+	}
 	out := Outgoing{Kind: c.kind, Text: c.text, FileName: c.fileName, MimeType: c.mimeType}
 	bot, ok := b.route(ctx, chat, sender, info, &out)
 	if !ok {
-		return
+		return false
+	}
+	if history {
+		at := info.Timestamp.In(b.loc)
+		out.Stamp = at.Format("02.01 15:04")
+		b.markDay(ctx, bot, out, at)
 	}
 	if c.quoted != "" {
 		if id, err := b.store.ByWhatsApp(ctx, chat.String(), c.quoted, bot.ID(), out.Chat); err == nil {
@@ -179,7 +209,7 @@ func (b *Bridge) HandleWhatsApp(ctx context.Context, evt *events.Message) {
 	bot, msgID, err := b.deliver(ctx, bot, chat, sender, info, out)
 	if err != nil {
 		b.log.Error("send to Telegram", "chat", chat.User, "kind", kindName(out.Kind), "err", err)
-		return
+		return false
 	}
 	link := store.Link{
 		Bot: bot.ID(), TGChat: out.Chat, TGMsg: msgID, WAChat: chat.String(), WAID: info.ID,
@@ -188,8 +218,23 @@ func (b *Bridge) HandleWhatsApp(ctx context.Context, evt *events.Message) {
 	if err := b.store.PutLink(ctx, link); err != nil {
 		b.log.Error("store link", "err", err)
 	}
-	if !info.IsFromMe {
+	if !info.IsFromMe && !history {
 		b.addUnread(chat.String(), pending{id: info.ID, chat: info.Chat, sender: info.Sender, at: info.Timestamp})
+	}
+	return true
+}
+
+// markDay sends a day marker through bot when out starts a new day in its chat.
+func (b *Bridge) markDay(ctx context.Context, bot Telegram, out Outgoing, at time.Time) {
+	key := fmt.Sprintf("%d/%d/%d", store.GroupBot(out.Chat, bot.ID()), out.Chat, out.Thread)
+	day := at.Format("Mon, 2 Jan 2006")
+	if b.lastDay[key] == day {
+		return
+	}
+	b.lastDay[key] = day
+	marker := Outgoing{Chat: out.Chat, Thread: out.Thread, Kind: KindText, Text: "📅 " + day}
+	if _, err := bot.Send(ctx, marker); err != nil {
+		b.log.Warn("day marker", "err", err)
 	}
 }
 

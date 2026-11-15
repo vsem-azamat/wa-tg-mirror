@@ -21,6 +21,10 @@ Each message gets five minutes in total, so a stuck request cannot stall the eve
 
 Messages you send from another device (your phone) are mirrored with a 📱 header.
 
+## History
+
+`backfill` links a new device with a full history sync, collects the messages of the last days from the history sync events (and live messages that arrive meanwhile), sorts them by time and passes each through the same routing as live messages. History messages carry a time stamp, each Telegram chat gets a day marker when the day changes, already mirrored messages are skipped and no read receipts are sent.
+
 ## Telegram to WhatsApp
 
 Only messages from `owner_id` are handled.

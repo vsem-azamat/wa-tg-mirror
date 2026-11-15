@@ -3,6 +3,7 @@
 owner_id: 123456789          # your Telegram user ID; the bots ignore everyone else
 database: /data/wa-tg-mirror.db
 mark_read: true              # mark a WhatsApp chat read when you write to it from Telegram
+time_zone: Europe/Berlin     # time stamps of history messages; default UTC
 bot_name: "WA: {name}"       # display name of each person's bot; default "{name}"
 
 service_bot:

@@ -50,6 +50,8 @@ type Outgoing struct {
 	Thread  int // forum topic, 0 for none
 	ReplyTo int // Telegram message to reply to, 0 for none
 	Kind    Kind
+	// Stamp is a plain time stamp shown first, for messages from the history.
+	Stamp string
 	// Header is trusted HTML put before the text, such as the sender's name in bold.
 	Header string
 	// Text is the message text or caption, sent as plain text.

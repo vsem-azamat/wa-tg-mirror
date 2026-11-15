@@ -66,6 +66,14 @@ func (b *Bot) Username() string { return b.name }
 func (b *Bot) Send(ctx context.Context, out bridge.Outgoing) (int, error) {
 	text := out.Text
 	header := out.Header
+	if out.Stamp != "" {
+		stamp := "<i>🕓 " + html.EscapeString(out.Stamp) + "</i>"
+		if header == "" {
+			header = stamp
+		} else {
+			header = stamp + " " + header
+		}
+	}
 	if out.Kind == bridge.KindText || out.Kind == bridge.KindSticker {
 		if out.Kind == bridge.KindSticker && header != "" {
 			// A sticker has no caption: name the sender in a message of its own first.

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
+	_ "time/tzdata" // the distroless image has no zone files
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +21,8 @@ type Config struct {
 	Database string `yaml:"database"`
 	// MarkRead marks a WhatsApp chat as read when the owner writes to it from Telegram.
 	MarkRead bool `yaml:"mark_read"`
+	// TimeZone is the IANA zone of the time stamps on history messages; default UTC.
+	TimeZone string `yaml:"time_zone"`
 	// BotName is the display name of a person's bot; {name} stands for people[].name.
 	BotName string `yaml:"bot_name"`
 	// ServiceBot writes to WhatsApp groups, speaks for senders without a bot and runs the overflow forum.
@@ -86,6 +90,9 @@ func Parse(raw []byte, lookup func(string) (string, bool)) (*Config, error) {
 	if c.BotName == "" {
 		c.BotName = "{name}"
 	}
+	if c.TimeZone == "" {
+		c.TimeZone = "UTC"
+	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -116,6 +123,9 @@ func (c *Config) validate() error {
 	}
 	if c.Database == "" {
 		errs = append(errs, errors.New("database is required"))
+	}
+	if _, err := time.LoadLocation(c.TimeZone); err != nil {
+		errs = append(errs, fmt.Errorf("time_zone: %w", err))
 	}
 	if !strings.Contains(c.BotName, "{name}") {
 		errs = append(errs, errors.New("bot_name must contain {name}"))

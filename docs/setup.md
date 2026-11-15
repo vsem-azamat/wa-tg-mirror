@@ -35,6 +35,7 @@ See [`config.example.yaml`](../config.example.yaml). The file is decoded strictl
 | --- | --- |
 | `owner_id` | Your Telegram user ID. Bots ignore everyone else. |
 | `database` | SQLite file with the WhatsApp session and the bridge state. |
+| `time_zone` | IANA zone of the time stamps on history messages, such as `Europe/Prague`; default `UTC`. |
 | `bot_name` | Display name of each person's bot, `{name}` stands for `people[].name`; default `{name}`. |
 | `mark_read` | When you write to a chat, its received messages are marked read in WhatsApp. |
 | `service_bot.token` | Token of the service bot. |

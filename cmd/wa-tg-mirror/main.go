@@ -25,6 +25,7 @@ const usage = `usage: wa-tg-mirror <command> [flags]
 
 commands:
   serve        run the bridge (-config config.yaml, -heartbeat file)
+  backfill     relink with full history and mirror the last days (-days 30); stop serve first
   check        validate the configuration (-config config.yaml)
   healthcheck  exit 0 when the heartbeat file is fresh
   version      print the build version
@@ -52,6 +53,8 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "serve":
 		return serve(ctx, args[1:])
+	case "backfill":
+		return backfill(ctx, args[1:])
 	case "check":
 		return check(args[1:])
 	case "healthcheck":
