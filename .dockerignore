@@ -1,0 +1,7 @@
+/bin/
+/.worktrees/
+/.git/
+config.yaml
+.env
+*.db
+*.db-*

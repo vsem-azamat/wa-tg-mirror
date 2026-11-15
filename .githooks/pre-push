@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# The CI checks before anything leaves the machine. Install with `make hooks`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+make check

@@ -1,0 +1,125 @@
+// Package bridge moves messages between WhatsApp and the Telegram bots.
+package bridge
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+)
+
+// WhatsApp is the part of the WhatsApp client the bridge uses.
+type WhatsApp interface {
+	SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
+	Upload(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
+	MarkRead(ctx context.Context, ids []types.MessageID, ts time.Time, chat, sender types.JID, receiptTypeExtra ...types.ReceiptType) error
+}
+
+// Directory answers who is who on WhatsApp.
+type Directory interface {
+	// Own returns the account's own phone-number JID.
+	Own() types.JID
+	// PhoneJID returns the phone-number JID for a LID, or jid itself when it already is one.
+	PhoneJID(ctx context.Context, jid types.JID) types.JID
+	// Name returns the best display name known for a user or group.
+	Name(ctx context.Context, jid types.JID) string
+}
+
+// Kind is the type of a Telegram message the bridge sends.
+type Kind int
+
+// The kinds of outgoing Telegram messages.
+const (
+	KindText Kind = iota
+	KindPhoto
+	KindVideo
+	KindAnimation
+	KindVoice
+	KindAudio
+	KindDocument
+	KindSticker
+)
+
+// Outgoing is one message for a bot to send.
+type Outgoing struct {
+	Chat    int64
+	Thread  int // forum topic, 0 for none
+	ReplyTo int // Telegram message to reply to, 0 for none
+	Kind    Kind
+	// Header is trusted HTML put before the text, such as the sender's name in bold.
+	Header string
+	// Text is the message text or caption, sent as plain text.
+	Text     string
+	Data     []byte
+	FileName string
+	MimeType string
+}
+
+// IncomingFile is a file attached to a message the owner sent in Telegram.
+type IncomingFile struct {
+	FileID   string
+	FileName string
+	MimeType string
+	Seconds  int
+}
+
+// Telegram is one bot.
+type Telegram interface {
+	// ID is the bot's user ID.
+	ID() int64
+	// Send sends out and returns the ID of the first message it produced.
+	Send(ctx context.Context, out Outgoing) (int, error)
+	// Download fetches a file the owner sent.
+	Download(ctx context.Context, fileID string) ([]byte, error)
+	// CreateTopic creates a forum topic and returns its thread ID.
+	CreateTopic(ctx context.Context, chat int64, name string) (int, error)
+}
+
+// Profile is a bot that can change its own name and photo.
+type Profile interface {
+	Telegram
+	// SetName changes the bot's display name when it differs.
+	SetName(ctx context.Context, name string) error
+	// SetPhoto replaces the bot's profile photo; nil removes it.
+	SetPhoto(ctx context.Context, jpeg []byte) error
+}
+
+// Pictures fetches WhatsApp profile pictures.
+type Pictures interface {
+	// Picture returns the current picture ID and image of a user, or "" when there is none.
+	Picture(ctx context.Context, jid types.JID) (id string, jpeg []byte, err error)
+}
+
+// Incoming is a message the owner sent to a bot.
+type Incoming struct {
+	Chat    int64
+	Private bool
+	Thread  int // forum topic, 0 outside forums
+	ID      int
+	From    int64
+	ReplyTo int // the message it replies to, 0 for none
+	Kind    Kind
+	Text    string // text or caption
+	File    *IncomingFile
+	// Location is set for a shared location: latitude, longitude.
+	Location *[2]float64
+	// Unsupported names a message type the bridge cannot send, such as an animated sticker.
+	Unsupported string
+	// Service marks a Telegram service message (members, title, topics), never sent on.
+	Service bool
+	// Command is the name of a bot command such as "start"; commands are not sent on.
+	Command string
+}
+
+// Errors a Telegram implementation reports so the bridge can recover.
+var (
+	// ErrForbidden means the bot may not write to the chat: it is not a member, or the
+	// owner never started it.
+	ErrForbidden = errors.New("bot may not write to this chat")
+	// ErrTopicGone means the forum topic was deleted.
+	ErrTopicGone = errors.New("forum topic no longer exists")
+)

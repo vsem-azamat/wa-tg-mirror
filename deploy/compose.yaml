@@ -1,0 +1,20 @@
+# Runs on the host as written by the deploy workflow. No ports are published: the bridge
+# only makes outgoing connections to WhatsApp and the Telegram Bot API.
+services:
+  wa-tg-mirror:
+    image: ghcr.io/vsem-azamat/wa-tg-mirror:${IMAGE_TAG:?IMAGE_TAG is required}
+    restart: unless-stopped
+    # Long polls and in-flight uploads finish before the session is closed cleanly.
+    stop_grace_period: 45s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./data:/data
+      - ./config.yaml:/config/config.yaml:ro
+    env_file: .env
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

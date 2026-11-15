@@ -1,0 +1,25 @@
+# Copy to config.yaml (never committed). Tokens may be written as ${NAME} to read them
+# from the environment instead of keeping them in this file.
+owner_id: 123456789          # your Telegram user ID; the bots ignore everyone else
+database: /data/wa-tg-mirror.db
+mark_read: true              # mark a WhatsApp chat read when you write to it from Telegram
+bot_name: "WA: {name}"       # display name of each person's bot; default "{name}"
+
+service_bot:
+  token: ${SERVICE_BOT_TOKEN}
+
+people:                      # each person gets their own bot
+  - name: Alice
+    phone: "15550000001"     # international number, digits only
+    bot:
+      token: ${ALICE_BOT_TOKEN}
+
+groups:                      # WhatsApp groups mirrored into Telegram groups
+  - name: Family
+    wa_jid: 120363000000000000@g.us   # find it with `wa-tg-mirror discover`
+    tg_chat_id: -1001234567890        # the service bot and the people's bots are members
+
+overflow:                    # optional forum supergroup: one topic per other chat
+  tg_chat_id: -1009876543210
+  ignore:
+    - 0@s.whatsapp.net
