@@ -35,6 +35,7 @@ func backfill(ctx context.Context, args []string) error {
 	cfgPath := fs.String("config", "config.yaml", "configuration file")
 	days := fs.Int("days", 30, "how many days of history to mirror")
 	phone := fs.String("phone", "", "your WhatsApp number, digits only; read from the current session when empty")
+	useQR := fs.Bool("qr", false, "pair by QR codes sent as photos instead of a pairing code")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -67,8 +68,8 @@ func backfill(ctx context.Context, args []string) error {
 		}
 		log.Info("current device unlinked")
 	}
-	if *phone == "" {
-		return errors.New("no session to read the number from: pass -phone")
+	if *phone == "" && !*useQR {
+		return errors.New("no session to read the number from: pass -phone or -qr")
 	}
 
 	wa.RequestFullHistory(*days)
@@ -77,22 +78,22 @@ func backfill(ctx context.Context, args []string) error {
 	hist.log = log
 	rt.cli.AddEventHandler(hist.handle)
 
-	// A code is valid while the login socket is open, under three minutes; a code that
-	// was not typed in time is replaced by a new one.
+	// A pairing code or QR series lives while the login socket is open, under three
+	// minutes; when it runs out unused, pairing starts over.
 	for attempt := 1; ; attempt++ {
-		err = wa.PairWithCode(ctx, rt.cli, *phone, func(code string) {
-			notify(fmt.Sprintf("Pairing code for the history load: %s\n\n"+
-				"WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead, then type the code.", code))
-			log.Info("pairing code sent to the owner", "attempt", attempt)
-		})
+		if *useQR {
+			err = wa.Connect(ctx, rt.cli, sendQR(ctx, log, rt.service, cfg.OwnerID))
+		} else {
+			err = pairByCode(ctx, log, rt, *phone, attempt, notify)
+		}
 		if err == nil {
 			break
 		}
 		if attempt == pairAttempts || ctx.Err() != nil {
-			notify("Pairing failed; run backfill again with -phone <your number>.")
+			notify("Pairing failed; run backfill again (with -qr, or -phone <your number>).")
 			return err
 		}
-		log.Warn("pairing did not complete; sending a new code", "err", err)
+		log.Warn("pairing did not complete; trying again", "err", err)
 		rt.cli.Disconnect()
 	}
 	defer rt.cli.Disconnect()
@@ -127,6 +128,15 @@ func backfill(ctx context.Context, args []string) error {
 	notify(fmt.Sprintf("History loaded: %d messages mirrored. Start the bridge again.", sent))
 	log.Info("history loaded", "sent", sent)
 	return nil
+}
+
+// pairByCode pairs with a code that the owner types on the phone.
+func pairByCode(ctx context.Context, log *slog.Logger, rt *runtime, phone string, attempt int, notify func(string)) error {
+	return wa.PairWithCode(ctx, rt.cli, phone, func(code string) {
+		notify(fmt.Sprintf("Pairing code for the history load: %s\n\n"+
+			"WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead, then type the code.", code))
+		log.Info("pairing code sent to the owner", "attempt", attempt)
+	})
 }
 
 // pairAttempts is how many pairing codes are offered before giving up.

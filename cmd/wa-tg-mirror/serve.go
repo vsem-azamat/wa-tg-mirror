@@ -79,16 +79,7 @@ func serve(ctx context.Context, args []string) error {
 		}
 	})
 
-	err = wa.Connect(ctx, cli, func(code string) {
-		png, err := qrcode.Encode(code, qrcode.Medium, 512)
-		if err != nil {
-			log.Error("encode QR", "err", err)
-			return
-		}
-		if err := service.SendPhoto(ctx, cfg.OwnerID, png, "Scan in WhatsApp → Linked devices → Link a device"); err != nil {
-			log.Error("send QR", "err", err)
-		}
-	})
+	err = wa.Connect(ctx, cli, sendQR(ctx, log, service, cfg.OwnerID))
 	if err != nil {
 		return err
 	}
@@ -220,3 +211,18 @@ func (rt *runtime) newClient(ctx context.Context) error {
 }
 
 func (rt *runtime) close() { _ = rt.db.Close() }
+
+// sendQR returns a callback that sends each pairing QR code to the owner as a photo.
+func sendQR(ctx context.Context, log *slog.Logger, bot *tg.Bot, owner int64) func(code string) {
+	return func(code string) {
+		png, err := qrcode.Encode(code, qrcode.Medium, 512)
+		if err != nil {
+			log.Error("encode QR", "err", err)
+			return
+		}
+		caption := "Scan in WhatsApp → Settings → Linked devices → Link a device. A new code follows every 20 s; scan the latest."
+		if err := bot.SendPhoto(ctx, owner, png, caption); err != nil {
+			log.Error("send QR", "err", err)
+		}
+	}
+}

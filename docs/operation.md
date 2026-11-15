@@ -40,7 +40,7 @@ docker compose --env-file image.env up -d
 ```
 
 1. It unlinks the current device (WhatsApp then lists it as gone on the phone) and links a new one that asks for the full history of the last days (at most 35).
-2. The service bot sends you a pairing code: WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead. Have the phone at hand: a code lives under three minutes, after which a new one is sent, five times at most. If pairing fails for good, the old device is already unlinked: run the command again with `-phone <your number>`.
+2. The service bot sends you a pairing code (with `-qr`, QR codes as photos instead, to scan from a second screen such as Telegram on a computer): WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead. Have the phone at hand: a code lives under three minutes, after which a new one is sent, five times at most. If pairing fails for good, the old device is already unlinked: run the command again with `-phone <your number>`.
 3. Once the full sync reports completion (or no history arrived for five minutes, at most 30 minutes), the messages of the mirrored chats from the last days are posted oldest first, each with its time and a day marker when the day changes. Messages mirrored before are skipped, so the command can be run again.
 4. Messages that arrive while it posts are posted by it too, in later passes, until a pass finds nothing new; then it disconnects, and anything later waits on the WhatsApp server for `serve`.
 
