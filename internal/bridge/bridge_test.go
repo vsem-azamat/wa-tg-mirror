@@ -92,6 +92,8 @@ type fakeDir struct{ names map[string]string }
 
 func (fakeDir) Own() types.JID { return types.NewJID(ownPhone, types.DefaultUserServer) }
 
+func (fakeDir) IsOwn(jid types.JID) bool { return jid.User == ownPhone }
+
 func (fakeDir) PhoneJID(_ context.Context, jid types.JID) types.JID {
 	if jid.Server == types.HiddenUserServer && jid.User == "lid-alice" {
 		return types.NewJID(alicePhone, types.DefaultUserServer)
@@ -550,5 +552,67 @@ func TestGroupChangesAndCallsAreNoted(t *testing.T) {
 	f.b.HandleCall(t.Context(), pn(alicePhone), types.EmptyJID, true)
 	if out := last(t, f.alice); out.Chat != owner || !strings.Contains(out.Text, "video call") {
 		t.Fatalf("call %+v", out)
+	}
+}
+
+func TestEditsReachLinksStoredBeforeSenderBotExisted(t *testing.T) {
+	f := newFixture(t)
+	a := pn(alicePhone)
+	// A link as the migration leaves it: the posting bot unknown.
+	if err := f.b.store.PutLink(t.Context(), store.Link{
+		Bot: f.alice.id, TGChat: owner, TGMsg: 9, WAChat: a.String(), WAID: "OLD", WASender: a.String(), SenderBot: store.UnknownBot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.b.HandleWhatsApp(t.Context(), protocol("E1", waE2E.ProtocolMessage_MESSAGE_EDIT, "OLD", a, a,
+		&waE2E.Message{Conversation: proto.String("new")}))
+	if len(f.alice.edits) != 1 || f.alice.edits[0].ReplyTo != 9 {
+		t.Fatalf("edits %+v", f.alice.edits)
+	}
+}
+
+func TestLiveLocationAndUnshowableReactionsAreIgnored(t *testing.T) {
+	f := newFixture(t)
+	f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 7, From: owner, Location: &[2]float64{1, 2}})
+	n := len(f.wa.sent)
+	f.b.HandleTelegramEdit(t.Context(), f.alice, Incoming{Chat: owner, Private: true, ID: 7, From: owner, Location: &[2]float64{1, 3}})
+	f.b.HandleTelegramReaction(t.Context(), f.alice, Reaction{Chat: owner, Msg: 7, From: owner, Other: true})
+	if len(f.wa.sent) != n {
+		t.Fatalf("sent %d more", len(f.wa.sent)-n)
+	}
+}
+
+func TestOwnerReactionInForumReachesWhatsApp(t *testing.T) {
+	f := newFixture(t)
+	s := pn(strangerPN)
+	f.b.HandleWhatsApp(t.Context(), waText("S1", "hey", s, s, false))
+	f.b.HandleTelegramReaction(t.Context(), f.service, Reaction{Chat: forumChat, Msg: 1, From: owner, Emoji: "👍"})
+	if r := f.wa.sent[len(f.wa.sent)-1].msg.GetReactionMessage(); r.GetKey().GetID() != "S1" {
+		t.Fatalf("sent %+v", f.wa.sent)
+	}
+}
+
+func TestReactionsOfPeopleWithoutBotAreNamedNotes(t *testing.T) {
+	f := newFixture(t)
+	g, _ := types.ParseJID(groupJID)
+	f.b.HandleWhatsApp(t.Context(), waText("G1", "news", g, pn(bobPhone), false))
+	react := waText("X1", "", g, pn(strangerPN), false)
+	react.Message = &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key: &waCommon.MessageKey{ID: proto.String("G1")}, Text: proto.String("👍"),
+	}}
+	f.b.HandleWhatsApp(t.Context(), react)
+	out := last(t, f.service)
+	if len(f.service.reacted) != 0 || out.ReplyTo != 1 || out.Text != "👍" || !strings.Contains(out.Header, "Stranger") {
+		t.Fatalf("reacted %v out %+v", f.service.reacted, out)
+	}
+}
+
+func TestUnknownCommandInGroupIsAnsweredOnce(t *testing.T) {
+	f := newFixture(t)
+	if p := f.b.HandleTelegram(t.Context(), f.alice, Incoming{Chat: groupChat, ID: 1, From: owner, Command: "foo"}); p != "" {
+		t.Fatalf("person bot answered: %s", p)
+	}
+	if p := f.b.HandleTelegram(t.Context(), f.service, Incoming{Chat: groupChat, ID: 1, From: owner, Command: "foo"}); p == "" {
+		t.Fatal("service bot must answer")
 	}
 }

@@ -25,8 +25,10 @@ Events on mirrored messages, found through the message links:
 
 - **Edits** replace the text or caption of the Telegram copy, marked "✏️ edited", through the bot that posted it.
 - **Deletions for everyone** delete the Telegram copy; after Telegram's 48 hours, when a bot may no longer delete, the copy is replaced by "🗑 deleted in WhatsApp".
-- **Reactions** are set by the bot of the person who reacted (in a private chat only that chat's bot can react). Telegram offers bots a fixed set of emoji; skin tones are dropped, and an emoji outside the set, or a reaction by someone without a bot, arrives as a short reply instead. Your own reactions from the phone are not shown.
-- **Calls** are noted in the caller's chat; **group changes** (renamed, description, members joining or leaving) are noted by the service bot.
+- **Reactions** are set by the bot of the person who reacted (in a private chat only that chat's bot can react). Telegram offers bots a fixed set of emoji; skin tones are dropped, and an emoji outside the set arrives as a short reply instead. A bot holds one reaction per message, so reactions of people without a bot arrive as replies from the service bot that name them. Your own reactions from the phone are not shown.
+- **Calls** are noted in the caller's chat; **group changes** (renamed, description, members joining or leaving) are noted by the service bot. In overflow chats this happens only once the chat has a topic.
+
+Links stored before the bridge recorded which bot posted a message are resolved from the chat and the sender.
 
 Typing indicators are not mirrored: WhatsApp sends them only to clients that show themselves online, which would keep you online all the time.
 
@@ -43,8 +45,8 @@ Only messages from `owner_id` are handled.
 - A reply to a mirrored message becomes a WhatsApp reply that quotes it.
 - Files over 20 MB cannot be downloaded by bots and are refused. Animated and video stickers are sent as their emoji.
 - Telegram service messages (members added, title changed, topics edited) are not sent on.
-- An edit of your text message is sent as a WhatsApp edit (WhatsApp accepts them for 15 minutes); caption edits are not.
-- Your reaction to a mirrored message becomes a WhatsApp reaction. Telegram reports reactions to administrators in groups, so the service bot handles them there.
+- An edit of your text message is sent as a WhatsApp edit (WhatsApp accepts them for 15 minutes); caption edits are not, and the updates of a live location are not edits.
+- Your reaction to a mirrored message becomes a WhatsApp reaction; custom-emoji and paid reactions are not sent. Telegram reports reactions to administrators in groups, so the service bot handles them there.
 - `/del` in reply to your own message deletes it in WhatsApp for everyone and removes both messages in Telegram. Other `/` commands are not sent.
 - When a message cannot be sent, the bot replies with the reason.
 

@@ -30,9 +30,12 @@ type Link struct {
 	// Text is a short copy of the message, used to quote it in a WhatsApp reply.
 	Text string
 	// SenderBot is the bot that posted the Telegram message, 0 for the owner's own
-	// messages; only that bot may edit it.
+	// messages, UnknownBot for links stored before the bridge recorded it.
 	SenderBot int64
 }
+
+// UnknownBot is the SenderBot of links from before the column existed.
+const UnknownBot int64 = -1
 
 // ErrNotFound means there is no link or topic for the key.
 var ErrNotFound = errors.New("not found")
@@ -74,7 +77,7 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 		return nil, fmt.Errorf("inspect bridge tables: %w", err)
 	}
 	if has == 0 {
-		if _, err := db.ExecContext(ctx, `ALTER TABLE mirror_links ADD COLUMN sender_bot INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE mirror_links ADD COLUMN sender_bot INTEGER NOT NULL DEFAULT -1`); err != nil {
 			return nil, fmt.Errorf("add sender_bot: %w", err)
 		}
 	}

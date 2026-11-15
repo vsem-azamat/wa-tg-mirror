@@ -122,9 +122,10 @@ func ToReaction(r *telego.MessageReactionUpdated) bridge.Reaction {
 	for _, t := range r.NewReaction {
 		if e, ok := t.(*telego.ReactionTypeEmoji); ok {
 			out.Emoji = e.Emoji
-			break
+			return out
 		}
 	}
+	out.Other = len(r.NewReaction) > 0
 	return out
 }
 

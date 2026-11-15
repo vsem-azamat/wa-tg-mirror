@@ -37,6 +37,31 @@ func (b *Bridge) handleProtocol(ctx context.Context, chat, sender types.JID, inf
 	return true
 }
 
+// posterOf returns the bot that posted a link's Telegram message, and false for the
+// owner's own messages. Links from before this was recorded are worked out from the
+// chat and the sender.
+func (b *Bridge) posterOf(ctx context.Context, l store.Link) (Telegram, bool) {
+	switch l.SenderBot {
+	case 0:
+		return nil, false
+	case store.UnknownBot:
+		sender, err := types.ParseJID(l.WASender)
+		if err == nil && b.dir.IsOwn(sender) && l.TGChat == b.owner {
+			return nil, false
+		}
+		if l.TGChat > 0 {
+			return b.bot(l.Bot)
+		}
+		if err == nil {
+			if p, ok := b.byPhone[b.canonical(ctx, sender).User]; ok {
+				return p.bot, true
+			}
+		}
+		return b.service, true
+	}
+	return b.bot(l.SenderBot)
+}
+
 // bot returns the bot with the given ID.
 func (b *Bridge) bot(id int64) (Telegram, bool) {
 	if id == b.service.ID() {
@@ -58,19 +83,22 @@ func (b *Bridge) revoked(ctx context.Context, chat types.JID, target string) {
 	for _, l := range links {
 		// Bots may delete their own messages, incoming ones in private chats, and any
 		// message where they are administrators: try the poster first, then the service bot.
-		bot, ok := b.bot(l.SenderBot)
-		if !ok {
-			bot, ok = b.bot(l.Bot)
+		poster, posted := b.posterOf(ctx, l)
+		bot := poster
+		if !posted {
+			if chatBot, ok := b.bot(l.Bot); ok {
+				bot = chatBot
+			}
 		}
-		if !ok {
+		if bot == nil {
 			bot = b.service
 		}
 		err := bot.Delete(ctx, l.TGChat, l.TGMsg)
 		if err != nil && bot != b.service && l.TGChat < 0 {
 			err = b.service.Delete(ctx, l.TGChat, l.TGMsg)
 		}
-		if err != nil && l.SenderBot != 0 {
-			err = bot.Edit(ctx, l.TGChat, l.TGMsg, Outgoing{Kind: KindText, Text: deletedText})
+		if err != nil && posted {
+			err = poster.Edit(ctx, l.TGChat, l.TGMsg, Outgoing{Kind: KindText, Text: deletedText})
 		}
 		if err != nil {
 			b.log.Warn("mirror deletion", "chat", chat.User, "err", err)
@@ -92,13 +120,16 @@ func (b *Bridge) edited(ctx context.Context, chat, sender types.JID, info types.
 		return
 	}
 	for _, l := range links {
-		bot, ok := b.bot(l.SenderBot)
+		bot, ok := b.posterOf(ctx, l)
 		if !ok {
 			continue // the owner's own message from Telegram: nothing to update there
 		}
 		header := editedHeader
-		if bot == b.service {
+		switch {
+		case bot == b.service:
 			header = b.senderHeader(ctx, sender, info, info.IsFromMe) + " " + editedHeader
+		case info.IsFromMe:
+			header = ownHeader + " " + editedHeader
 		}
 		if err := bot.Edit(ctx, l.TGChat, l.TGMsg, Outgoing{Kind: KindText, Header: header, Text: c.text}); err != nil {
 			b.log.Warn("mirror edit", "chat", chat.User, "err", err)
@@ -130,6 +161,14 @@ func (b *Bridge) reacted(ctx context.Context, chat, sender types.JID, info types
 			// In a private chat only the chat's own bot can react.
 			continue
 		}
+		if bot == b.service && l.TGChat < 0 {
+			// The service bot holds one reaction per message for everyone without a
+			// bot of their own: name the reactor in a note instead. A removal stays.
+			if emoji != "" {
+				b.reactionNote(ctx, l, sender, info, emoji)
+			}
+			continue
+		}
 		err := bot.React(ctx, l.TGChat, l.TGMsg, emoji)
 		if err == nil || emoji == "" {
 			if err != nil {
@@ -137,18 +176,32 @@ func (b *Bridge) reacted(ctx context.Context, chat, sender types.JID, info types
 			}
 			continue
 		}
-		// An emoji Telegram does not offer, a bot outside the group, or a second person
-		// reacting through the service bot: say it in a short reply instead.
-		note := Outgoing{Chat: l.TGChat, ReplyTo: l.TGMsg, Kind: KindText, Text: emoji}
+		// An emoji Telegram does not offer, or a bot outside the group: say it in a
+		// short reply instead.
 		if l.TGChat < 0 {
-			note.Header = b.senderHeader(ctx, sender, info, false)
+			b.reactionNote(ctx, l, sender, info, emoji)
+			continue
 		}
-		if bot != b.service && l.TGChat < 0 {
-			bot = b.service
-		}
+		note := Outgoing{Chat: l.TGChat, ReplyTo: l.TGMsg, Kind: KindText, Text: emoji}
 		if _, err := bot.Send(ctx, note); err != nil {
 			b.log.Warn("mirror reaction", "chat", chat.User, "err", err)
 		}
+	}
+}
+
+// reactionNote posts a reaction as a reply from the service bot naming the reactor.
+func (b *Bridge) reactionNote(ctx context.Context, l store.Link, sender types.JID, info types.MessageInfo, emoji string) {
+	note := Outgoing{
+		Chat: l.TGChat, ReplyTo: l.TGMsg, Kind: KindText, Text: emoji,
+		Header: b.senderHeader(ctx, sender, info, false),
+	}
+	if l.TGChat == b.overflow {
+		if thread, err := b.store.Topic(ctx, l.WAChat); err == nil {
+			note.Thread = thread
+		}
+	}
+	if _, err := b.service.Send(ctx, note); err != nil {
+		b.log.Warn("mirror reaction", "err", err)
 	}
 }
 
@@ -164,8 +217,11 @@ func (b *Bridge) HandleTelegramEdit(ctx context.Context, bot Telegram, in Incomi
 	if err != nil {
 		return ""
 	}
-	if l.SenderBot != 0 {
+	if _, posted := b.posterOf(ctx, l); posted {
 		return ""
+	}
+	if in.Location != nil {
+		return "" // a live location moving, not an edit
 	}
 	if in.Kind != KindText {
 		return "⚠️ Caption edits are not sent to WhatsApp."
@@ -186,10 +242,10 @@ func (b *Bridge) HandleTelegramEdit(ctx context.Context, bot Telegram, in Incomi
 
 // HandleTelegramReaction sends the owner's reaction to WhatsApp.
 func (b *Bridge) HandleTelegramReaction(ctx context.Context, bot Telegram, r Reaction) {
-	if r.From != b.owner {
+	if r.From != b.owner || r.Other {
 		return
 	}
-	if _, ok, _ := b.target(ctx, bot, Incoming{Chat: r.Chat, Private: r.Chat > 0, From: r.From}); !ok {
+	if !b.servesChat(bot, r.Chat) {
 		return
 	}
 	l, err := b.store.ByTelegram(ctx, bot.ID(), r.Chat, r.Msg)
@@ -213,6 +269,19 @@ func (b *Bridge) HandleTelegramReaction(ctx context.Context, bot Telegram, r Rea
 	}
 }
 
+// servesChat reports whether bot is the one that acts on the owner's input in chat:
+// a person's bot in its private chat, the service bot in mirrored groups and the forum.
+func (b *Bridge) servesChat(bot Telegram, chat int64) bool {
+	if _, ok := b.byBot[bot.ID()]; ok {
+		return chat == b.owner
+	}
+	if bot.ID() != b.service.ID() {
+		return false
+	}
+	_, group := b.byTGChat[chat]
+	return group || b.overflow != 0 && chat == b.overflow
+}
+
 // deleteOwn deletes the owner's message that a /del command replies to, in
 // WhatsApp for everyone and in Telegram.
 func (b *Bridge) deleteOwn(ctx context.Context, bot Telegram, in Incoming) string {
@@ -220,7 +289,7 @@ func (b *Bridge) deleteOwn(ctx context.Context, bot Telegram, in Incoming) strin
 		return "Reply with /del to your own message to delete it in WhatsApp."
 	}
 	l, err := b.store.ByTelegram(ctx, bot.ID(), in.Chat, in.ReplyTo)
-	if errors.Is(err, store.ErrNotFound) || err == nil && l.WASender != b.dir.Own().String() {
+	if errors.Is(err, store.ErrNotFound) || err == nil && !b.ownLink(l) {
 		return "Only your own messages can be deleted in WhatsApp."
 	}
 	if err != nil {
@@ -244,9 +313,24 @@ func (b *Bridge) deleteOwn(ctx context.Context, bot Telegram, in Incoming) strin
 	return ""
 }
 
+// ownLink reports whether a link is to a message the owner sent.
+func (b *Bridge) ownLink(l store.Link) bool {
+	sender, err := types.ParseJID(l.WASender)
+	return err == nil && b.dir.IsOwn(sender)
+}
+
 // notice posts a line about a chat event (a call, members joining) where the chat
 // is mirrored: the person's bot for a direct chat, the service bot for groups.
 func (b *Bridge) notice(ctx context.Context, chat types.JID, isGroup bool, text string) {
+	_, person := b.byPhone[chat.User]
+	_, group := b.groups[chat.String()]
+	if !person && !group {
+		// Elsewhere only in a chat that already has a topic: a call or a join in a
+		// chat nobody wrote in must not open one.
+		if _, err := b.store.Topic(ctx, chat.String()); err != nil {
+			return
+		}
+	}
 	info := types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat, IsGroup: isGroup}}
 	out := Outgoing{Kind: KindText, Text: text}
 	bot, ok := b.route(ctx, chat, chat, info, &out)

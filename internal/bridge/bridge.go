@@ -428,14 +428,14 @@ func (b *Bridge) HandleTelegram(ctx context.Context, bot Telegram, in Incoming) 
 	if in.From != b.owner || in.Service {
 		return ""
 	}
-	if in.Command == "del" {
-		// Every bot in a group sees commands; only the one that serves the chat acts.
+	if in.Command != "" {
+		// Every bot in a group sees commands; only the one that serves the chat answers.
 		if _, ok, problem := b.target(ctx, bot, in); !ok {
 			return problem
 		}
-		return b.deleteOwn(ctx, bot, in)
-	}
-	if in.Command != "" {
+		if in.Command == "del" {
+			return b.deleteOwn(ctx, bot, in)
+		}
 		if quietCommands[in.Command] {
 			return ""
 		}

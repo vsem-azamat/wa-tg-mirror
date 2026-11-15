@@ -26,6 +26,8 @@ type WhatsApp interface {
 type Directory interface {
 	// Own returns the account's own phone-number JID.
 	Own() types.JID
+	// IsOwn reports whether a JID (phone number or LID) is the account's own.
+	IsOwn(jid types.JID) bool
 	// PhoneJID returns the phone-number JID for a LID, or jid itself when it already is one.
 	PhoneJID(ctx context.Context, jid types.JID) types.JID
 	// Name returns the best display name known for a user or group.
@@ -111,6 +113,8 @@ type Reaction struct {
 	Msg   int
 	From  int64
 	Emoji string // "" when the reaction was removed
+	// Other marks a reaction WhatsApp cannot show (custom emoji, paid stars).
+	Other bool
 }
 
 // Incoming is a message the owner sent to a bot.
