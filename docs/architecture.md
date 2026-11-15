@@ -10,9 +10,10 @@ One process holds one WhatsApp linked-device session and long-polls every bot.
    - a direct chat with a configured person goes to the owner through that person's bot;
    - a configured group goes to its Telegram group, through the sender's bot when they have one and through the service bot with their name in bold otherwise;
    - any other chat goes to its overflow topic, created on first use and named after the contact or group; ignored chats are dropped.
-4. Media is downloaded and re-uploaded. Files over the Bot API limit of 50 MB arrive as a note, checked against the announced size before downloading. Animated stickers arrive as files.
-5. A reply in WhatsApp becomes a reply to the mirrored Telegram message when it is known.
-6. Delivery recovers where it can:
+4. Locations and venues, contact cards and polls become native Telegram messages; they take no caption, so a sender's name or a caption goes in a message just before them. A live location shows its first position only. Telegram polls take 2 to 12 options of up to 100 characters.
+5. Media is downloaded and re-uploaded. Files over the Bot API limit of 50 MB arrive as a note, checked against the announced size before downloading. Animated stickers arrive as files.
+6. A reply in WhatsApp becomes a reply to the mirrored Telegram message when it is known.
+7. Delivery recovers where it can:
    - when Telegram limits the rate (429), the call waits as long as Telegram asks and is repeated, which keeps messages in order;
    - when a person's bot may not write (it is not in the group, or you never started it), the service bot posts the message with the sender's name, and in the private case tells you once which bot to start;
    - when an overflow topic was deleted, it is created again.
@@ -26,6 +27,7 @@ Events on mirrored messages, found through the message links:
 - **Edits** replace the text or caption of the Telegram copy, marked "✏️ edited", through the bot that posted it.
 - **Deletions for everyone** delete the Telegram copy; after Telegram's 48 hours, when a bot may no longer delete, the copy is replaced by "🗑 deleted in WhatsApp".
 - **Reactions** are set by the bot of the person who reacted (in a private chat only that chat's bot can react). Telegram offers bots a fixed set of emoji; skin tones are dropped, and an emoji outside the set arrives as a short reply instead. A bot holds one reaction per message, so reactions of people without a bot arrive as replies from the service bot that name them. Your own reactions from the phone are not shown.
+- **Poll votes** are decrypted and arrive as replies to the poll naming the choice ("🗳 Sat"), from the voter's bot or from the service bot with the voter's name: bots cannot vote for others in Telegram.
 - **Calls** are noted in the caller's chat; **group changes** (renamed, description, members joining or leaving) are noted by the service bot. In overflow chats this happens only once the chat has a topic.
 
 Links stored before the bridge recorded which bot posted a message are resolved from the chat and the sender.
@@ -47,6 +49,7 @@ Only messages from `owner_id` are handled.
 - Telegram service messages (members added, title changed, topics edited) are not sent on.
 - An edit of your text message is sent as a WhatsApp edit (WhatsApp accepts them for 15 minutes); caption edits are not, and the updates of a live location are not edits.
 - Your reaction to a mirrored message becomes a WhatsApp reaction; custom-emoji and paid reactions are not sent. Telegram reports reactions to administrators in groups, so the service bot handles them there.
+- Locations, venues, contact cards and polls you send become native WhatsApp messages; your vote in a mirrored poll (the bridge sends polls as non-anonymous) becomes your WhatsApp vote.
 - `/del` in reply to your own message deletes it in WhatsApp for everyone and removes both messages in Telegram. Other `/` commands are not sent.
 - When a message cannot be sent, the bot replies with the reason.
 
@@ -54,12 +57,13 @@ With `mark_read`, sending to a chat marks the messages received in it since the 
 
 ## State
 
-The SQLite database holds the whatsmeow session tables and three bridge tables:
+The SQLite database holds the whatsmeow session tables and the bridge tables:
 
 | Table | Contents |
 | --- | --- |
 | `mirror_links` | Telegram message ↔ WhatsApp message, with a short copy of the text for quotes |
 | `mirror_topics` | WhatsApp chat ↔ overflow topic |
+| `mirror_polls` | WhatsApp poll ↔ Telegram poll ID, with the option names to decode votes |
 | `mirror_avatars` | WhatsApp picture ID last set as each bot's photo |
 
 Bot names are set at every connection when they differ. Bot photos are set when the person's WhatsApp picture ID changes, at connection and on picture-change events.

@@ -70,9 +70,14 @@ func TestToIncoming(t *testing.T) {
 		t.Fatalf("unknown content %+v", unknown)
 	}
 
-	poll := ToIncoming(&telego.Message{Poll: &telego.Poll{}})
-	if poll.Unsupported == "" {
+	poll := ToIncoming(&telego.Message{Poll: &telego.Poll{Question: "Q", Options: []telego.PollOption{{Text: "a"}, {Text: "b"}}}})
+	if poll.Poll == nil || poll.Poll.Question != "Q" || len(poll.Poll.Options) != 2 {
 		t.Fatalf("poll %+v", poll)
+	}
+
+	dice := ToIncoming(&telego.Message{Dice: &telego.Dice{Emoji: "🎲"}})
+	if dice.Unsupported == "" {
+		t.Fatalf("dice %+v", dice)
 	}
 }
 

@@ -1,12 +1,15 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/vsem-azamat/wa-tg-mirror/internal/store"
@@ -398,4 +401,95 @@ func (b *Bridge) HandleCall(ctx context.Context, from, group types.JID, video bo
 		return
 	}
 	b.notice(ctx, b.canonical(ctx, from), false, kind+" — answer it on the phone")
+}
+
+// voted notes a WhatsApp poll vote under the Telegram copy of the poll. Bots cannot
+// vote for others in Telegram, so votes arrive as replies naming the voter.
+func (b *Bridge) voted(ctx context.Context, evt *events.Message, chat, sender types.JID) {
+	if evt.Info.IsFromMe {
+		return // the owner's votes from the phone
+	}
+	target := evt.Message.GetPollUpdateMessage().GetPollCreationMessageKey().GetID()
+	poll, err := b.store.PollByWhatsApp(ctx, chat.String(), target)
+	if err != nil {
+		return
+	}
+	vote, err := b.wa.DecryptPollVote(ctx, evt)
+	if err != nil {
+		b.log.Warn("decrypt poll vote", "chat", chat.User, "err", err)
+		return
+	}
+	hashes := whatsmeow.HashPollOptions(poll.Options)
+	var chosen []string
+	for _, h := range vote.GetSelectedOptions() {
+		for i, oh := range hashes {
+			if bytes.Equal(h, oh) {
+				chosen = append(chosen, poll.Options[i])
+			}
+		}
+	}
+	text := "🗳 " + strings.Join(chosen, ", ")
+	if len(chosen) == 0 {
+		text = "🗳 vote withdrawn"
+	}
+	links, err := b.store.LinksOf(ctx, chat.String(), target)
+	if err != nil || len(links) == 0 {
+		return
+	}
+	for _, l := range links {
+		bot := b.service
+		out := Outgoing{Chat: l.TGChat, ReplyTo: l.TGMsg, Kind: KindText, Text: text}
+		switch p, has := b.byPhone[sender.User]; {
+		case has && (l.TGChat < 0 || l.Bot == p.bot.ID()):
+			bot = p.bot
+		case l.TGChat > 0:
+			continue // a private chat that is not the voter's
+		default:
+			out.Header = b.senderHeader(ctx, sender, evt.Info, false)
+		}
+		if l.TGChat == b.overflow {
+			if thread, err := b.store.Topic(ctx, l.WAChat); err == nil {
+				out.Thread = thread
+			}
+		}
+		if _, err := bot.Send(ctx, out); err != nil {
+			b.log.Warn("mirror poll vote", "chat", chat.User, "err", err)
+		}
+	}
+}
+
+// HandlePollAnswer sends the owner's vote in a mirrored poll to WhatsApp.
+func (b *Bridge) HandlePollAnswer(ctx context.Context, a PollAnswer) {
+	if a.From != b.owner {
+		return
+	}
+	poll, err := b.store.PollByTelegram(ctx, a.PollID)
+	if err != nil {
+		return
+	}
+	chat, err := types.ParseJID(poll.WAChat)
+	if err != nil {
+		return
+	}
+	sender, err := types.ParseJID(poll.WASender)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(a.Options))
+	for _, i := range a.Options {
+		if i >= 0 && i < len(poll.Options) {
+			names = append(names, poll.Options[i])
+		}
+	}
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: b.dir.IsOwn(sender), IsGroup: chat.Server == types.GroupServer},
+		ID:            poll.WAID,
+	}
+	msg, err := b.wa.BuildPollVote(ctx, info, names)
+	if err == nil {
+		_, err = b.wa.SendMessage(ctx, chat, msg)
+	}
+	if err != nil {
+		b.log.Warn("send poll vote", "chat", chat.User, "err", err)
+	}
 }

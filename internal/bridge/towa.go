@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 
@@ -33,10 +34,29 @@ func buildWA(ctx context.Context, wa WhatsApp, tg Telegram, in Incoming, q *quot
 		return nil, fmt.Errorf("%s cannot be sent to WhatsApp", in.Unsupported)
 	}
 	ci := q.contextInfo()
-	if in.Location != nil {
+	if l := in.Location; l != nil {
 		return &waE2E.Message{LocationMessage: &waE2E.LocationMessage{
-			DegreesLatitude: proto.Float64(in.Location[0]), DegreesLongitude: proto.Float64(in.Location[1]), ContextInfo: ci,
+			DegreesLatitude: proto.Float64(l.Lat), DegreesLongitude: proto.Float64(l.Lon),
+			Name: optional(l.Title), Address: optional(l.Address), ContextInfo: ci,
 		}}, nil
+	}
+	if c := in.Contact; c != nil {
+		return &waE2E.Message{ContactMessage: &waE2E.ContactMessage{
+			DisplayName: proto.String(c.Name), Vcard: proto.String(cmp.Or(c.VCard, vcardOf(*c))), ContextInfo: ci,
+		}}, nil
+	}
+	if p := in.Poll; p != nil {
+		selectable := 1
+		if p.Multi {
+			selectable = 0 // any number
+		}
+		msg := wa.BuildPollCreation(p.Question, p.Options, selectable)
+		if ci != nil {
+			if pc := msg.GetPollCreationMessage(); pc != nil {
+				pc.ContextInfo = ci
+			}
+		}
+		return msg, nil
 	}
 	if in.Kind == KindText {
 		if ci == nil {
@@ -93,9 +113,18 @@ func buildWA(ctx context.Context, wa WhatsApp, tg Telegram, in Incoming, q *quot
 			FileSHA256: up.FileSHA256, FileLength: &up.FileLength, Mimetype: proto.String(orDefault(in.File.MimeType, "application/octet-stream")),
 			FileName: proto.String(name), Title: proto.String(name), Caption: caption, ContextInfo: ci,
 		}}, nil
-	case KindText:
+	case KindText, KindLocation, KindContact, KindPoll:
 	}
 	return nil, fmt.Errorf("unexpected message kind %d", in.Kind)
+}
+
+// vcardOf builds a minimal vCard for a contact Telegram sent without one.
+func vcardOf(c Contact) string {
+	tel := ""
+	if c.Phone != "" {
+		tel = fmt.Sprintf("TEL;type=CELL;waid=%s:+%s\n", c.Phone, c.Phone)
+	}
+	return "BEGIN:VCARD\nVERSION:3.0\nFN:" + c.Name + "\n" + tel + "END:VCARD"
 }
 
 func mediaType(k Kind) whatsmeow.MediaType {
@@ -106,7 +135,7 @@ func mediaType(k Kind) whatsmeow.MediaType {
 		return whatsmeow.MediaVideo
 	case KindVoice, KindAudio:
 		return whatsmeow.MediaAudio
-	case KindText, KindDocument:
+	case KindText, KindDocument, KindLocation, KindContact, KindPoll:
 	}
 	return whatsmeow.MediaDocument
 }
