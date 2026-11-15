@@ -65,15 +65,7 @@ func (b *Bot) Username() string { return b.name }
 // Send sends out and returns the ID of its first message.
 func (b *Bot) Send(ctx context.Context, out bridge.Outgoing) (int, error) {
 	text := out.Text
-	header := out.Header
-	if out.Stamp != "" {
-		stamp := "<i>🕓 " + html.EscapeString(out.Stamp) + "</i>"
-		if header == "" {
-			header = stamp
-		} else {
-			header = stamp + " " + header
-		}
-	}
+	header := fullHeader(out)
 	if out.Kind == bridge.KindLocation || out.Kind == bridge.KindContact {
 		return b.sendNative(ctx, out, header, text)
 	}
@@ -109,6 +101,21 @@ func (b *Bot) Send(ctx context.Context, out bridge.Outgoing) (int, error) {
 	}
 	return id, nil
 }
+
+// fullHeader is the header with the time stamp of a history message in front.
+func fullHeader(out bridge.Outgoing) string {
+	if out.Stamp == "" {
+		return out.Header
+	}
+	stamp := "<i>🕓 " + html.EscapeString(out.Stamp) + "</i>"
+	if out.Header == "" {
+		return stamp
+	}
+	return stamp + " " + out.Header
+}
+
+// maxVCard is the largest vCard Telegram accepts with a contact.
+const maxVCard = 2048
 
 // compose joins the trusted HTML header with escaped text.
 func compose(header, text string) string {
@@ -360,10 +367,10 @@ func (b *Bot) sendNative(ctx context.Context, out bridge.Outgoing, header, text 
 	case out.Kind == bridge.KindLocation && out.Location != nil:
 		l := out.Location
 		m, err := retry(ctx, func() (*telego.Message, error) {
-			if l.Title != "" {
+			if l.Title != "" || l.Address != "" {
 				return b.api.SendVenue(ctx, &telego.SendVenueParams{
 					ChatID: chat, MessageThreadID: out.Thread, Latitude: l.Lat, Longitude: l.Lon,
-					Title: l.Title, Address: cmpOr(l.Address, l.Title), ReplyParameters: reply,
+					Title: cmpOr(l.Title, l.Address), Address: cmpOr(l.Address, l.Title), ReplyParameters: reply,
 				})
 			}
 			return b.api.SendLocation(ctx, &telego.SendLocationParams{
@@ -380,10 +387,14 @@ func (b *Bot) sendNative(ctx context.Context, out bridge.Outgoing, header, text 
 			if phone != "" {
 				phone = "+" + phone
 			}
+			vcard := c.VCard
+			if len(vcard) > maxVCard {
+				vcard = "" // a card with a photo or many fields: name and number still go through
+			}
 			m, err := retry(ctx, func() (*telego.Message, error) {
 				return b.api.SendContact(ctx, &telego.SendContactParams{
 					ChatID: chat, MessageThreadID: out.Thread, PhoneNumber: cmpOr(phone, "-"), FirstName: cmpOr(c.Name, "Contact"),
-					Vcard: c.VCard, ReplyParameters: reply,
+					Vcard: vcard, ReplyParameters: reply,
 				})
 			})
 			if err != nil {
@@ -399,22 +410,30 @@ func (b *Bot) sendNative(ctx context.Context, out bridge.Outgoing, header, text 
 	return first, nil
 }
 
+// maxPollOptions is the most options a Telegram poll may have.
+const maxPollOptions = 12
+
 // SendPoll sends a non-anonymous poll, preceded by the header when there is one.
 // Telegram allows 2 to 12 options of up to 100 characters and a question of 300.
 func (b *Bot) SendPoll(ctx context.Context, out bridge.Outgoing) (int, string, error) {
 	p := out.Poll
+	header := fullHeader(out)
 	if p == nil || len(p.Options) < 2 {
-		id, err := b.sendText(ctx, out, out.Header, "📊 "+pollText(p))
+		id, err := b.sendText(ctx, out, header, "📊 "+pollText(p))
 		return id, "", err
 	}
-	if out.Header != "" {
-		if _, err := b.sendText(ctx, out, out.Header, ""); err != nil {
+	note := ""
+	if extra := len(p.Options) - maxPollOptions; extra > 0 {
+		note = fmt.Sprintf("Telegram shows %d options; also in WhatsApp: %s", maxPollOptions, strings.Join(p.Options[maxPollOptions:], ", "))
+	}
+	if header != "" || note != "" {
+		if _, err := b.sendText(ctx, out, header, note); err != nil {
 			return 0, "", err
 		}
 		out.ReplyTo = 0
 	}
-	opts := make([]telego.InputPollOption, 0, min(len(p.Options), 12))
-	for _, o := range p.Options[:min(len(p.Options), 12)] {
+	opts := make([]telego.InputPollOption, 0, min(len(p.Options), maxPollOptions))
+	for _, o := range p.Options[:min(len(p.Options), maxPollOptions)] {
 		opts = append(opts, telego.InputPollOption{Text: truncateRunes(o, 100)})
 	}
 	anonymous := false

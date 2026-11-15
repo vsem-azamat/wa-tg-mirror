@@ -123,3 +123,9 @@ func TestNormalizeReaction(t *testing.T) {
 		}
 	}
 }
+
+func TestFullHeaderPutsStampFirst(t *testing.T) {
+	if got := fullHeader(bridge.Outgoing{Stamp: "01.02 03:04", Header: "<b>A</b>"}); got != "<i>🕓 01.02 03:04</i> <b>A</b>" {
+		t.Fatalf("got %q", got)
+	}
+}

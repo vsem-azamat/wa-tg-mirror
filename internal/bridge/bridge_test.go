@@ -698,3 +698,19 @@ func TestPollsVotesContactsAndLocations(t *testing.T) {
 		t.Fatalf("poll %v", pc)
 	}
 }
+
+func TestLiveLocationUpdatesAreShownOnce(t *testing.T) {
+	f := newFixture(t)
+	a := pn(alicePhone)
+	for i, ts := range []time.Time{time.Unix(1000, 0), time.Unix(1060, 0)} {
+		m := waText("L"+strconv.Itoa(i), "", a, a, false)
+		m.Info.Timestamp = ts
+		m.Message = &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{
+			DegreesLatitude: proto.Float64(1), DegreesLongitude: proto.Float64(2), SequenceNumber: proto.Int64(int64(i)),
+		}}
+		f.b.HandleWhatsApp(t.Context(), m)
+	}
+	if len(f.alice.out) != 1 || f.alice.out[0].Kind != KindLocation {
+		t.Fatalf("out %+v", f.alice.out)
+	}
+}

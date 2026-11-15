@@ -452,7 +452,12 @@ func (b *Bridge) voted(ctx context.Context, evt *events.Message, chat, sender ty
 				out.Thread = thread
 			}
 		}
-		if _, err := bot.Send(ctx, out); err != nil {
+		_, err := bot.Send(ctx, out)
+		if errors.Is(err, ErrForbidden) && bot != b.service && l.TGChat < 0 {
+			out.Header = b.senderHeader(ctx, sender, evt.Info, false)
+			_, err = b.service.Send(ctx, out)
+		}
+		if err != nil {
 			b.log.Warn("mirror poll vote", "chat", chat.User, "err", err)
 		}
 	}

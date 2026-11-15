@@ -10,7 +10,7 @@ One process holds one WhatsApp linked-device session and long-polls every bot.
    - a direct chat with a configured person goes to the owner through that person's bot;
    - a configured group goes to its Telegram group, through the sender's bot when they have one and through the service bot with their name in bold otherwise;
    - any other chat goes to its overflow topic, created on first use and named after the contact or group; ignored chats are dropped.
-4. Locations and venues, contact cards and polls become native Telegram messages; they take no caption, so a sender's name or a caption goes in a message just before them. A live location shows its first position only. Telegram polls take 2 to 12 options of up to 100 characters.
+4. Locations and venues, contact cards and polls become native Telegram messages; they take no caption, so a sender's name or a caption goes in a message just before them. A live location shows its first position only; later positions of the same share (within eight hours) are not posted again. vCards over 2048 bytes are sent without the vCard. Polls with more than 12 options list the rest in the message before them. Telegram polls take 2 to 12 options of up to 100 characters.
 5. Media is downloaded and re-uploaded. Files over the Bot API limit of 50 MB arrive as a note, checked against the announced size before downloading. Animated stickers arrive as files.
 6. A reply in WhatsApp becomes a reply to the mirrored Telegram message when it is known.
 7. Delivery recovers where it can:

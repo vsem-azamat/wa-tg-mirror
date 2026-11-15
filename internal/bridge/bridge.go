@@ -81,6 +81,8 @@ type Bridge struct {
 	loc *time.Location
 	// lastDay is the last day marked in each Telegram chat during a history run.
 	lastDay map[string]string
+	// lives holds when each sender last started a live location in a chat.
+	lives map[string]time.Time
 }
 
 // New builds a bridge. bots maps each person's phone to their bot.
@@ -92,6 +94,7 @@ func New(log *slog.Logger, cfg *config.Config, wa WhatsApp, dir Directory, st *s
 		byPhone: map[string]*person{}, byBot: map[int64]*person{}, groups: map[string]*group{},
 		byTGChat: map[int64]*group{}, ignored: map[string]bool{}, sent: map[types.MessageID]bool{},
 		unread: map[string][]pending{}, notified: map[int64]bool{}, lastDay: map[string]string{},
+		lives: map[string]time.Time{},
 	}
 	loc, err := time.LoadLocation(cfg.TimeZone)
 	if err != nil {
@@ -194,6 +197,9 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 	if c.skip {
 		return false
 	}
+	if c.location != nil && c.location.Live && !history && b.liveSeen(chat, sender, info.Timestamp) {
+		return false // a position update of a live location already shown
+	}
 	if history {
 		if done, err := b.store.HasWhatsApp(ctx, chat.String(), info.ID); err != nil || done {
 			return false
@@ -244,6 +250,24 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 	}
 	if !info.IsFromMe && !history {
 		b.addUnread(chat.String(), pending{id: info.ID, chat: info.Chat, sender: info.Sender, at: info.Timestamp})
+	}
+	return true
+}
+
+// liveWindow is how long a live location counts as the same share; WhatsApp shares
+// last at most eight hours.
+const liveWindow = 8 * time.Hour
+
+// liveSeen reports whether sender shared a live location in chat within liveWindow
+// before at, and remembers this one.
+func (b *Bridge) liveSeen(chat, sender types.JID, at time.Time) bool {
+	key := chat.String() + "/" + sender.String()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	last, ok := b.lives[key]
+	if !ok || at.Sub(last) > liveWindow {
+		b.lives[key] = at
+		return false
 	}
 	return true
 }
