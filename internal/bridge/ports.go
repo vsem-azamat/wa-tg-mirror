@@ -24,6 +24,8 @@ type WhatsApp interface {
 	BuildPollCreation(name string, optionNames []string, selectableOptionCount int) *waE2E.Message
 	BuildPollVote(ctx context.Context, pollInfo *types.MessageInfo, optionNames []string) (*waE2E.Message, error)
 	DecryptPollVote(ctx context.Context, vote *events.Message) (*waE2E.PollVoteMessage, error)
+	SendPresence(ctx context.Context, state types.Presence) error
+	SubscribePresence(ctx context.Context, jid types.JID) error
 }
 
 // Directory answers who is who on WhatsApp.
@@ -126,6 +128,8 @@ type Telegram interface {
 	React(ctx context.Context, chat int64, msg int, emoji string) error
 	// SendPoll sends out.Poll as a non-anonymous poll and returns its message and poll IDs.
 	SendPoll(ctx context.Context, out Outgoing) (int, string, error)
+	// Typing shows that the bot is typing, or recording a voice message, for a few seconds.
+	Typing(ctx context.Context, chat int64, thread int, voice bool) error
 }
 
 // PollAnswer is the owner's vote in a mirrored poll.

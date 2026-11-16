@@ -32,7 +32,7 @@ Events on mirrored messages, found through the message links:
 
 Links stored before the bridge recorded which bot posted a message are resolved from the chat and the sender.
 
-Typing indicators are not mirrored: WhatsApp sends them only to clients that show themselves online, which would keep you online all the time.
+Typing is mirrored one way, while you are active. WhatsApp sends typing only to clients that show themselves online, and while one is online the phone gets no notifications. So the bridge marks you online for three minutes after each message, edit, reaction, vote or deletion you send through the mirror, and marks you unavailable again after that. In this window, someone typing or recording a voice message shows as the bot typing or recording, in the chat where their message would appear. Typing is not shown in a forum chat that has no topic yet. Telegram does not tell bots when you type, so your typing does not reach WhatsApp.
 
 ## History
 

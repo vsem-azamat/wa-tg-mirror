@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strconv"
@@ -44,6 +45,23 @@ type fakeWA struct {
 	voteFor    string
 	voteOpts   []string
 	voteChoice []string
+	// presence records SendPresence states; subscribed records SubscribePresence.
+	presence   []types.Presence
+	subscribed []types.JID
+}
+
+func (f *fakeWA) SendPresence(_ context.Context, state types.Presence) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.presence = append(f.presence, state)
+	return nil
+}
+
+func (f *fakeWA) SubscribePresence(_ context.Context, jid types.JID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribed = append(f.subscribed, jid)
+	return nil
 }
 
 type sentWA struct {
@@ -135,6 +153,24 @@ type fakeBot struct {
 	edits   []Outgoing
 	deleted []int
 	reacted []string // "msg:emoji"
+	typed   []string // "chat/thread/typing" or ".../voice"
+}
+
+func (b *fakeBot) Typing(_ context.Context, chat int64, thread int, voice bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	action := "typing"
+	if voice {
+		action = "voice"
+	}
+	b.typed = append(b.typed, strconv.FormatInt(chat, 10)+"/"+strconv.Itoa(thread)+"/"+action)
+	return nil
+}
+
+func (b *fakeBot) typedCopy() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.typed...)
 }
 
 func (b *fakeBot) SendPoll(ctx context.Context, out Outgoing) (int, string, error) {
@@ -712,5 +748,100 @@ func TestLiveLocationUpdatesAreShownOnce(t *testing.T) {
 	}
 	if len(f.alice.out) != 1 || f.alice.out[0].Kind != KindLocation {
 		t.Fatalf("out %+v", f.alice.out)
+	}
+}
+
+func chatPresence(chat, sender types.JID, state types.ChatPresence, media types.ChatPresenceMedia) *events.ChatPresence {
+	return &events.ChatPresence{
+		MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsGroup: chat.Server == types.GroupServer},
+		State:         state, Media: media,
+	}
+}
+
+func waitTyped(t *testing.T, b *fakeBot, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, got := range b.typedCopy() {
+			if got == want {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("typed %v, want %q", b.typedCopy(), want)
+}
+
+func TestTypingIsShownThroughTheBotThatWouldMirror(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	group := types.NewJID("123-456", types.GroupServer)
+
+	f.b.HandleChatPresence(ctx, chatPresence(pn(alicePhone), pn(alicePhone), types.ChatPresenceComposing, ""))
+	waitTyped(t, f.alice, "1000/0/typing")
+	f.b.HandleChatPresence(ctx, chatPresence(group, pn(bobPhone), types.ChatPresenceComposing, types.ChatPresenceMediaAudio))
+	waitTyped(t, f.bob, "-1001111111111/0/voice")
+	f.b.HandleChatPresence(ctx, chatPresence(group, pn(strangerPN), types.ChatPresenceComposing, ""))
+	waitTyped(t, f.service, "-1001111111111/0/typing")
+
+	// A message from the typist ends their typing; "paused" does too.
+	f.b.HandleWhatsApp(ctx, waText("T1", "hi", pn(alicePhone), pn(alicePhone), false))
+	f.b.HandleChatPresence(ctx, chatPresence(group, pn(bobPhone), types.ChatPresencePaused, ""))
+	f.b.typingMu.Lock()
+	left := len(f.b.typing)
+	f.b.typingMu.Unlock()
+	if left != 1 {
+		t.Fatalf("%d typers left, want only the stranger's", left)
+	}
+
+	// A chat without a forum topic gets none created just for typing.
+	f.b.HandleChatPresence(ctx, chatPresence(pn("444"), pn("444"), types.ChatPresenceComposing, ""))
+	if len(f.service.topics) != 0 {
+		t.Fatalf("topics %v created for typing", f.service.topics)
+	}
+}
+
+func TestOwnerActionKeepsThemOnlineAndConnectRestoresPresence(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	f.b.Connected(ctx)
+	in := Incoming{Chat: owner, Private: true, ID: 7, From: owner, Kind: KindText, Text: "hello"}
+	for range 2 {
+		if p := f.b.HandleTelegram(ctx, f.alice, in); p != "" {
+			t.Fatal(p)
+		}
+	}
+	f.b.Connected(ctx)
+	want := []types.Presence{types.PresenceUnavailable, types.PresenceAvailable, types.PresenceAvailable}
+	if fmt.Sprint(f.wa.presence) != fmt.Sprint(want) {
+		t.Fatalf("presence %v, want %v", f.wa.presence, want)
+	}
+	// Going online subscribes both people; the reconnect inside the window again.
+	if len(f.wa.subscribed) != 4 {
+		t.Fatalf("subscribed %v, want both people twice", f.wa.subscribed)
+	}
+
+	// Once the window has passed, the timer takes the owner offline.
+	f.b.online.mu.Lock()
+	f.b.online.window = 20 * time.Millisecond
+	f.b.online.mu.Unlock()
+	f.b.stayOnline(ctx, pn(alicePhone))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.wa.mu.Lock()
+		got := f.wa.presence[len(f.wa.presence)-1]
+		f.wa.mu.Unlock()
+		if got == types.PresenceUnavailable {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("owner still online after the window")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// After that, a reconnect keeps them offline.
+	f.b.Connected(ctx)
+	if got := f.wa.presence[len(f.wa.presence)-1]; got != types.PresenceUnavailable {
+		t.Fatalf("presence %v after reconnect, want unavailable", got)
 	}
 }

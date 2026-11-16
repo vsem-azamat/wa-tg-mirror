@@ -71,7 +71,15 @@ func serve(ctx context.Context, args []string) error {
 			cancel(errors.New("logged out of WhatsApp"))
 		case *events.Connected:
 			log.Info("whatsapp connected")
+			go func() {
+				hctx, done := context.WithTimeout(ctx, time.Minute)
+				defer done()
+				b.Connected(hctx)
+			}()
 			go b.SyncProfiles(ctx, dir)
+		case *events.ChatPresence:
+			// The serve context, not a per-event one: typing is repeated after the call.
+			b.HandleChatPresence(ctx, e)
 		case *events.GroupInfo:
 			hctx, done := context.WithTimeout(ctx, handleTimeout)
 			change := bridge.GroupChange{Chat: e.JID, TopicChanged: e.Topic != nil, Join: e.Join, Leave: e.Leave}
