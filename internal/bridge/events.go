@@ -234,7 +234,7 @@ func (b *Bridge) HandleTelegramEdit(ctx context.Context, bot Telegram, in Incomi
 		return ""
 	}
 	msg := b.wa.BuildEdit(chat, l.WAID, &waE2E.Message{Conversation: proto.String(in.Text)})
-	if _, err := b.wa.SendMessage(ctx, chat, msg); err != nil {
+	if _, err := b.sendWA(ctx, chat, msg); err != nil {
 		return "⚠️ Edit not sent to WhatsApp (it allows edits for 15 minutes): " + err.Error()
 	}
 	if err := b.store.SetText(ctx, l.WAChat, l.WAID, truncate(in.Text, quoteLen)); err != nil {
@@ -267,7 +267,7 @@ func (b *Bridge) HandleTelegramReaction(ctx context.Context, bot Telegram, r Rea
 	if emoji == "❤" {
 		emoji = "❤️" // WhatsApp shows the bare heart as a black glyph
 	}
-	if _, err := b.wa.SendMessage(ctx, chat, b.wa.BuildReaction(chat, sender, l.WAID, emoji)); err != nil {
+	if _, err := b.sendWA(ctx, chat, b.wa.BuildReaction(chat, sender, l.WAID, emoji)); err != nil {
 		b.log.Warn("send reaction to WhatsApp", "chat", chat.User, "err", err)
 	}
 }
@@ -302,7 +302,7 @@ func (b *Bridge) deleteOwn(ctx context.Context, bot Telegram, in Incoming) strin
 	if err != nil {
 		return "⚠️ " + err.Error()
 	}
-	if _, err := b.wa.SendMessage(ctx, chat, b.wa.BuildRevoke(chat, b.dir.Own(), l.WAID)); err != nil {
+	if _, err := b.sendWA(ctx, chat, b.wa.BuildRevoke(chat, b.dir.Own(), l.WAID)); err != nil {
 		return "⚠️ Not deleted in WhatsApp: " + err.Error()
 	}
 	for _, id := range []int{in.ReplyTo, in.ID} {
@@ -492,7 +492,7 @@ func (b *Bridge) HandlePollAnswer(ctx context.Context, a PollAnswer) {
 	}
 	msg, err := b.wa.BuildPollVote(ctx, info, names)
 	if err == nil {
-		_, err = b.wa.SendMessage(ctx, chat, msg)
+		_, err = b.sendWA(ctx, chat, msg)
 	}
 	if err != nil {
 		b.log.Warn("send poll vote", "chat", chat.User, "err", err)

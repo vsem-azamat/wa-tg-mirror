@@ -83,6 +83,10 @@ type Bridge struct {
 	lastDay map[string]string
 	// lives holds when each sender last started a live location in a chat.
 	lives map[string]time.Time
+
+	online   online
+	typingMu sync.Mutex
+	typing   map[typingKey]*typer
 }
 
 // New builds a bridge. bots maps each person's phone to their bot.
@@ -94,7 +98,7 @@ func New(log *slog.Logger, cfg *config.Config, wa WhatsApp, dir Directory, st *s
 		byPhone: map[string]*person{}, byBot: map[int64]*person{}, groups: map[string]*group{},
 		byTGChat: map[int64]*group{}, ignored: map[string]bool{}, sent: map[types.MessageID]bool{},
 		unread: map[string][]pending{}, notified: map[int64]bool{}, lastDay: map[string]string{},
-		lives: map[string]time.Time{},
+		lives: map[string]time.Time{}, typing: map[typingKey]*typer{},
 	}
 	loc, err := time.LoadLocation(cfg.TimeZone)
 	if err != nil {
@@ -212,6 +216,9 @@ func (b *Bridge) mirror(ctx context.Context, evt *events.Message, history bool) 
 	bot, ok := b.route(ctx, chat, sender, info, &out)
 	if !ok {
 		return false
+	}
+	if !history {
+		b.stopTyping(typingKey{bot: bot.ID(), chat: out.Chat, thread: out.Thread})
 	}
 	if history {
 		at := info.Timestamp.In(b.loc)
@@ -503,7 +510,7 @@ func (b *Bridge) HandleTelegram(ctx context.Context, bot Telegram, in Incoming) 
 	if err != nil {
 		return "⚠️ Not sent to WhatsApp: " + err.Error()
 	}
-	resp, err := b.wa.SendMessage(ctx, target, msg)
+	resp, err := b.sendWA(ctx, target, msg)
 	if err != nil {
 		b.log.Error("send to WhatsApp", "chat", target.User, "err", err)
 		return "⚠️ Not sent to WhatsApp: " + err.Error()

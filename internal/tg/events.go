@@ -166,3 +166,15 @@ func (q *QRMessage) Show(ctx context.Context, png []byte, caption string) {
 	}
 	q.msgID = m.MessageID
 }
+
+// Typing shows the bot typing, or recording a voice message, in a chat or topic.
+// Telegram shows it for five seconds or until the bot sends a message. It is not
+// retried: a missed typing action is not worth a wait.
+func (b *Bot) Typing(ctx context.Context, chat int64, thread int, voice bool) error {
+	action := telego.ChatActionTyping
+	if voice {
+		action = telego.ChatActionRecordVoice
+	}
+	err := b.api.SendChatAction(ctx, &telego.SendChatActionParams{ChatID: tu.ID(chat), MessageThreadID: thread, Action: action})
+	return wrap("send chat action", err)
+}
