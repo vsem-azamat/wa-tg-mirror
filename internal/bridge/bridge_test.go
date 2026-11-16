@@ -816,16 +816,32 @@ func TestOwnerActionKeepsThemOnlineAndConnectRestoresPresence(t *testing.T) {
 	if fmt.Sprint(f.wa.presence) != fmt.Sprint(want) {
 		t.Fatalf("presence %v, want %v", f.wa.presence, want)
 	}
-	if len(f.wa.subscribed) != 2 || f.wa.subscribed[0] != pn(alicePhone) {
-		t.Fatalf("subscribed %v, want Alice first, then Bob once", f.wa.subscribed)
+	// Going online subscribes both people; the reconnect inside the window again.
+	if len(f.wa.subscribed) != 4 {
+		t.Fatalf("subscribed %v, want both people twice", f.wa.subscribed)
 	}
 
-	// Once the window has passed, the owner goes offline.
+	// Once the window has passed, the timer takes the owner offline.
 	f.b.online.mu.Lock()
-	f.b.online.until = time.Now().Add(-time.Second)
+	f.b.online.window = 20 * time.Millisecond
 	f.b.online.mu.Unlock()
-	f.b.goOffline()
+	f.b.stayOnline(ctx, pn(alicePhone))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.wa.mu.Lock()
+		got := f.wa.presence[len(f.wa.presence)-1]
+		f.wa.mu.Unlock()
+		if got == types.PresenceUnavailable {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("owner still online after the window")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// After that, a reconnect keeps them offline.
+	f.b.Connected(ctx)
 	if got := f.wa.presence[len(f.wa.presence)-1]; got != types.PresenceUnavailable {
-		t.Fatalf("last presence %v, want unavailable", got)
+		t.Fatalf("presence %v after reconnect, want unavailable", got)
 	}
 }

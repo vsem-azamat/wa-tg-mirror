@@ -100,6 +100,7 @@ func New(log *slog.Logger, cfg *config.Config, wa WhatsApp, dir Directory, st *s
 		unread: map[string][]pending{}, notified: map[int64]bool{}, lastDay: map[string]string{},
 		lives: map[string]time.Time{}, typing: map[typingKey]*typer{},
 	}
+	b.online.window = onlineWindow
 	loc, err := time.LoadLocation(cfg.TimeZone)
 	if err != nil {
 		return nil, fmt.Errorf("time zone: %w", err)

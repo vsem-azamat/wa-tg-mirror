@@ -27,11 +27,13 @@ const typingEvery = 4 * time.Second
 // in case the "paused" that should end it never arrives.
 const typingFor = 30 * time.Second
 
-// online keeps the owner online in WhatsApp for onlineWindow after each action.
+// online keeps the owner online in WhatsApp for a window after each action.
 type online struct {
-	mu    sync.Mutex
-	until time.Time
-	timer *time.Timer
+	mu     sync.Mutex
+	window time.Duration
+	on     bool // WhatsApp was told the owner is available
+	until  time.Time
+	timer  *time.Timer
 }
 
 // sendWA sends a message the owner wrote, then keeps the owner online so the
@@ -45,36 +47,41 @@ func (b *Bridge) sendWA(ctx context.Context, chat types.JID, msg *waE2E.Message)
 }
 
 // stayOnline marks the owner online, or extends the window when they already are,
-// and subscribes to the presence of chat and of every configured person.
+// and subscribes to the presence of chat. Every presence change happens under
+// online.mu, so the last one sent is always the one the state records.
 func (b *Bridge) stayOnline(ctx context.Context, chat types.JID) {
 	b.online.mu.Lock()
 	defer b.online.mu.Unlock()
-	wasOnline := time.Now().Before(b.online.until)
-	b.online.until = time.Now().Add(onlineWindow)
+	if !b.online.on {
+		if err := b.wa.SendPresence(ctx, types.PresenceAvailable); err != nil {
+			b.log.Warn("go online in WhatsApp", "err", err)
+			return // the next action tries again
+		}
+		b.online.on = true
+		b.subscribePeople(ctx)
+	}
+	if chat.Server == types.DefaultUserServer {
+		if _, person := b.byPhone[chat.User]; !person {
+			b.subscribe(ctx, chat)
+		}
+	}
+	b.online.until = time.Now().Add(b.online.window)
 	if b.online.timer != nil {
 		b.online.timer.Stop()
 	}
-	b.online.timer = time.AfterFunc(onlineWindow, b.goOffline)
-	if wasOnline {
-		return
-	}
-	if err := b.wa.SendPresence(ctx, types.PresenceAvailable); err != nil {
-		b.log.Warn("go online in WhatsApp", "err", err)
-		return
-	}
-	subscribe := []types.JID{}
-	if chat.Server == types.DefaultUserServer {
-		subscribe = append(subscribe, chat)
-	}
+	b.online.timer = time.AfterFunc(b.online.window, b.goOffline)
+}
+
+// subscribePeople asks for the presence of every configured person.
+func (b *Bridge) subscribePeople(ctx context.Context) {
 	for _, p := range b.byPhone {
-		if p.jid != chat {
-			subscribe = append(subscribe, p.jid)
-		}
+		b.subscribe(ctx, p.jid)
 	}
-	for _, jid := range subscribe {
-		if err := b.wa.SubscribePresence(ctx, jid); err != nil {
-			b.log.Warn("subscribe to presence", "chat", jid.User, "err", err)
-		}
+}
+
+func (b *Bridge) subscribe(ctx context.Context, jid types.JID) {
+	if err := b.wa.SubscribePresence(ctx, jid); err != nil {
+		b.log.Warn("subscribe to presence", "chat", jid.User, "err", err)
 	}
 }
 
@@ -82,10 +89,11 @@ func (b *Bridge) stayOnline(ctx context.Context, chat types.JID) {
 func (b *Bridge) goOffline() {
 	b.online.mu.Lock()
 	defer b.online.mu.Unlock()
-	if time.Now().Before(b.online.until) {
+	if !b.online.on || time.Now().Before(b.online.until) {
 		return // extended meanwhile; the new timer will come
 	}
 	b.online.timer = nil
+	b.online.on = false
 	ctx, cancel := context.WithTimeout(context.Background(), presenceTimeout)
 	defer cancel()
 	if err := b.wa.SendPresence(ctx, types.PresenceUnavailable); err != nil {
@@ -93,17 +101,22 @@ func (b *Bridge) goOffline() {
 	}
 }
 
-// Connected restores the owner's presence after WhatsApp (re)connects: online when
-// the window is open, otherwise unavailable so the phone keeps its notifications.
+// Connected restores the owner's presence after WhatsApp (re)connects: online with
+// fresh subscriptions when the window is open, otherwise unavailable so the phone
+// keeps its notifications.
 func (b *Bridge) Connected(ctx context.Context) {
 	b.online.mu.Lock()
-	state := types.PresenceUnavailable
-	if time.Now().Before(b.online.until) {
-		state = types.PresenceAvailable
+	defer b.online.mu.Unlock()
+	if b.online.on && time.Now().Before(b.online.until) {
+		if err := b.wa.SendPresence(ctx, types.PresenceAvailable); err != nil {
+			b.log.Warn("set WhatsApp presence", "err", err)
+		}
+		b.subscribePeople(ctx)
+		return
 	}
-	b.online.mu.Unlock()
-	if err := b.wa.SendPresence(ctx, state); err != nil {
-		b.log.Warn("set WhatsApp presence", "state", state, "err", err)
+	b.online.on = false
+	if err := b.wa.SendPresence(ctx, types.PresenceUnavailable); err != nil {
+		b.log.Warn("set WhatsApp presence", "err", err)
 	}
 }
 
@@ -130,6 +143,9 @@ func (b *Bridge) HandleChatPresence(ctx context.Context, evt *events.ChatPresenc
 	}
 	chat := b.canonical(ctx, evt.Chat)
 	sender := b.canonical(ctx, evt.Sender)
+	if b.ignored[evt.Chat.ToNonAD().String()] {
+		return
+	}
 	key, bot, ok := b.typingPlace(ctx, chat, sender, evt.IsGroup)
 	if !ok {
 		return
